@@ -18,7 +18,15 @@ Werkzeug: `OC=${CLAUDE_PLUGIN_ROOT}/scripts/oc` (Hilfe: `$OC` ohne Argument).
 
 ## Wenn oh-my-opencode-slim und superpowers installiert sind
 
-- Aufträge gehen an den Agenten **`orchestrator`**; er verteilt selbst an `fixer`, `explorer`, `librarian`, `oracle`, `designer`, `observer`. Nicht einzelne Subagenten ansprechen.
+- **Claude IST der Orchestrator.** Gemessen an 5 Aufträgen: Der omo-`orchestrator` hat nie an Subagenten delegiert (0 Kind-Sitzungen, 100 % seines eigenen Modells) — ein durchgeplanter Auftrag lässt ihm nichts zu zerlegen. Deshalb wählt Claude den Agenten je Auftrag selbst, per `OC_AGENT=<agent> $OC start …`, und nennt die Wahl kurz:
+
+  | Aufgabe | Agent | Warum |
+  |---|---|---|
+  | klein, mechanisch: Tests, Frontend-Kleinkram, Doku | `fixer` | günstigstes Modell; der Plan kommt von Claude |
+  | größer, mehrere Dateien, Backend, Querbezüge | `orchestrator` | stärkeres Modell, darf selbst delegieren |
+  | Oberfläche/Gestaltung | `designer` | dafür eingerichtet |
+
+  Welches Modell hinter welchem Agenten steht, zeigt `$OC setup`. Neue Wahl → nach dem Lauf Kosten (`/session/<id>/message` → `info.cost`) und Prüfbefunde notieren, damit die Tabelle auf Messung beruht.
 - **superpowers greift aktiv ein — im Auftrag abfangen:**
   - `brainstorming` („MUST use before any creative work“) führt zu Rückfragen und Warten auf Freigabe. Im Auftrag: *Anforderungen sind abgestimmt und freigegeben; kein Brainstorming, kein Design-Dokument. Nur bei echter fachlicher Unklarheit eine konkrete Frage.*
   - `using-git-worktrees` bzw. omo `worktrees` würden einen weiteren worktree anlegen. Im Auftrag: *Du bist bereits in einem isolierten worktree; keinen weiteren anlegen.* (`git worktree*` ist zusätzlich gesperrt.)

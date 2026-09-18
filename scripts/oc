@@ -23,6 +23,7 @@
 #   oc init                                        Sperr-Config ins Repo (lokal, nie committet)
 #   oc selftest                                    prüft mit billigem Modell, dass die Sperren greifen
 #   oc start  <slug> <branch> <titel> <auftrag.md> worktree + Sitzung + Auftrag + Tab
+#             (Agent je Auftrag: OC_AGENT=fixer oc start …; Standard siehe unten)
 #   oc send   <slug> <nachricht.md>                Korrektur in dieselbe Sitzung
 #   oc wait   <slug> [max_minuten]                 blockiert bis idle, druckt Abschlussmeldung
 #   oc open   <slug>                               Tab (erneut) öffnen
@@ -158,8 +159,8 @@ EOF
 }
 
 open_terminal() {
-  local slug="$1" dir sid port repo cmd
-  dir=$(state_get "$slug" dir); sid=$(state_get "$slug" session); port=$(state_get "$slug" port)
+  local slug="$1" dir sid port repo cmd agent
+  dir=$(state_get "$slug" dir); sid=$(state_get "$slug" session); port=$(state_get "$slug" port); agent=$(state_get "$slug" agent)
   repo=$(state_get "$slug" repo); repo="${repo:-$REPO}"
   [ -n "$dir" ] || die "unbekannter Auftrag: $slug"
   if [ -z "$port" ]; then
@@ -168,7 +169,7 @@ open_terminal() {
     echo "Worker $slug läuft schon (Port $port) — Tab ist offen."; return
   else
     # Wiederaufnahme nach geschlossenem Tab: gleicher Port, gleiche Sitzung.
-    cmd="cd $dir && printf '\\\\e]0;OC $slug\\\\a'; exec env OPENCODE_CONFIG=$repo/opencode.json opencode --port $port --agent $AGENT${sid:+ -s $sid}"
+    cmd="cd $dir && printf '\\\\e]0;OC $slug\\\\a'; exec env OPENCODE_CONFIG=$repo/opencode.json opencode --port $port --agent ${agent:-$AGENT}${sid:+ -s $sid}"
   fi
   open_tab "OC $slug" "$cmd"
 }
@@ -178,7 +179,8 @@ send_file() {
   dir=$(state_get "$slug" dir); sid=$(state_get "$slug" session); BASE=$(base_of "$slug")
   [ -n "$sid" ] || die "unbekannter Auftrag: $slug"
   [ -f "$file" ] || die "Datei fehlt: $file"
-  body=$(python3 -c 'import json,sys;print(json.dumps({"agent":sys.argv[1],"parts":[{"type":"text","text":open(sys.argv[2]).read()}]}))' "$AGENT" "$file")
+  local agent; agent=$(state_get "$slug" agent); agent="${agent:-$AGENT}"
+  body=$(python3 -c 'import json,sys;print(json.dumps({"agent":sys.argv[1],"parts":[{"type":"text","text":open(sys.argv[2]).read()}]}))' "$agent" "$file")
   code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/session/$sid/prompt_async?directory=$dir" \
     -H 'Content-Type: application/json' --data-binary "$body")
   [ "$code" = "204" ] || die "prompt_async lieferte HTTP $code"
@@ -263,7 +265,7 @@ cmd_start() {
     (cd "$d" && npm ci --no-audit --no-fund --silent >/dev/null 2>&1) || echo "WARNUNG: npm ci in $d fehlgeschlagen"
   done
   port=$(free_port); base="http://127.0.0.1:$port"
-  printf 'slug=%s\nbranch=%s\ntitle=%s\ndir=%s\nrepo=%s\nport=%s\n' "$slug" "$branch" "$title" "$dir" "$REPO" "$port" > "$STATE/$slug.env"
+  printf 'slug=%s\nbranch=%s\ntitle=%s\ndir=%s\nrepo=%s\nport=%s\nagent=%s\n' "$slug" "$branch" "$title" "$dir" "$REPO" "$port" "$AGENT" > "$STATE/$slug.env"
   open_terminal "$slug"
   for i in $(seq 1 60); do alive "$base" && break; sleep 0.5; done
   alive "$base" || die "Worker auf Port $port antwortet nicht — Tab ansehen"
