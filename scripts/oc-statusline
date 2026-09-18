@@ -1,35 +1,147 @@
-#!/bin/bash
-# oc-statusline — eine Zeile für die Claude-Code-Statusleiste: „OC 2▶ 1? 3✓“.
-#
-# Wird als ANHANG an eine bestehende Statuszeile gedacht (siehe
-# `oc-statusline-wrap`), nicht als Ersatz. Muss schnell sein und darf nie
-# scheitern: Die Statusleiste wird bei jeder Antwort neu gezeichnet, und ein
-# Fehler hier darf die eigentliche Zeile nicht mitreißen. Deshalb kurze
-# Timeouts und bei stillem Server gar keine Ausgabe.
-STATE="${OC_STATE:-$HOME/.local/state/oc-auftrag}"
-BASE="http://127.0.0.1:${OC_PORT:-4096}"
-ls "$STATE"/*.env >/dev/null 2>&1 || exit 0
-curl -s -m 0.5 -o /dev/null "$BASE/doc" || exit 0
-python3 - "$STATE" "$BASE" <<'PY' 2>/dev/null
-import json,os,sys,urllib.parse,urllib.request
-state,base=sys.argv[1],sys.argv[2]
-def get(p):
+#!/usr/bin/env python3
+"""oc-statusline — OpenCode-Aufträge in der Claude-Code-Statusleiste.
+
+Eine Zeile je Auftrag, der läuft, wartet oder in der letzten Stunde fertig
+wurde:
+
+  ▶ 276  Bestellung erst nach Zahlung  ███████░░░ 14/18  14 Dat. +179 −67  2,38 $  41m
+  ? 301  Tests Abholzeiten             WARTET: Soll der Reaper …
+  ✓ 288  Produktkarten-Vorschau        fertig vor 12m
+
+Gedacht als ANHANG unter eine bestehende Statuszeile (`oc-statusline-wrap`).
+
+Falle: Die Statusleiste wird bei jeder Antwort neu gezeichnet und darf nie
+hängen. Deshalb kurze Timeouts, ein Zwischenspeicher (5 s) und bei stillem
+Server gar keine Ausgabe — ein Fehler hier darf die Island-Zeile darüber nicht
+mitreißen.
+"""
+import json
+import os
+import subprocess
+import sys
+import time
+import urllib.parse
+import urllib.request
+
+STATE = os.environ.get("OC_STATE", os.path.expanduser("~/.local/state/oc-auftrag"))
+CACHE = os.path.join(STATE, ".statusline-cache")
+DEFAULT_PORT = os.environ.get("OC_PORT", "4096")
+FRISCH = 5          # Sekunden, die ein berechnetes Bild wiederverwendet wird
+FERTIG_SICHTBAR = 60  # Minuten, die ein fertiger Auftrag noch angezeigt wird
+
+C = {"cy": "\033[36m", "ye": "\033[33m", "gr": "\033[32m", "dim": "\033[2m", "b": "\033[1m", "r": "\033[0m", "red": "\033[31m"}
+
+
+def get(base, path, timeout=0.6):
+    """GET gegen einen OpenCode-Prozess; None bei jedem Fehler."""
     try:
-        with urllib.request.urlopen(base+p,timeout=0.6) as r: return json.loads(r.read() or b"null")
-    except Exception: return None
-run=ask=done=0
-for f in os.listdir(state):
-    if not f.endswith(".env"): continue
-    d=dict(l.rstrip("\n").split("=",1) for l in open(os.path.join(state,f)) if "=" in l)
-    q=urllib.parse.quote(d.get("dir",""))
-    sid=d.get("session","")
-    wartet=any(i.get("sessionID")==sid for i in (get(f"/question?directory={q}") or [])+(get(f"/permission?directory={q}") or []))
-    if wartet: ask+=1
-    elif sid in (get(f"/session/status?directory={q}") or {}): run+=1
-    else: done+=1
-teile=[]
-if run: teile.append(f"\033[36m{run}▶\033[0m")
-if ask: teile.append(f"\033[33m{ask}?\033[0m")
-if done: teile.append(f"\033[2m{done}✓\033[0m")
-if teile: print("OC " + " ".join(teile), end="")
-PY
+        with urllib.request.urlopen(base + path, timeout=timeout) as r:
+            return json.loads(r.read() or b"null")
+    except Exception:
+        return None
+
+
+def auftraege():
+    """Zustandsdateien lesen; `probe`-artige Einträge ohne Sitzung überspringen."""
+    out = []
+    if not os.path.isdir(STATE):
+        return out
+    for f in sorted(os.listdir(STATE)):
+        if not f.endswith(".env"):
+            continue
+        d = {}
+        for line in open(os.path.join(STATE, f)):
+            k, _, v = line.rstrip("\n").partition("=")
+            d[k] = v
+        if d.get("session"):
+            out.append(d)
+    return out
+
+
+def balken(fertig, gesamt, breite=10):
+    """Fortschrittsbalken aus der Todo-Liste des Orchestrators."""
+    if not gesamt:
+        return ""
+    voll = round(breite * fertig / gesamt)
+    return f"{C['cy']}{'█' * voll}{C['dim']}{'░' * (breite - voll)}{C['r']} {fertig}/{gesamt}"
+
+
+def diffstat(pfad):
+    """Geänderte Dateien und Zeilen im worktree (inkl. unversionierter Dateien)."""
+    try:
+        out = subprocess.run(["git", "-C", pfad, "diff", "--shortstat", "HEAD"],
+                             capture_output=True, text=True, timeout=1).stdout
+        neu = subprocess.run(["git", "-C", pfad, "ls-files", "--others", "--exclude-standard"],
+                             capture_output=True, text=True, timeout=1).stdout.split()
+    except Exception:
+        return ""
+    import re
+    n = re.search(r"(\d+) file", out)
+    plus = re.search(r"(\d+) insertion", out)
+    minus = re.search(r"(\d+) deletion", out)
+    dateien = (int(n.group(1)) if n else 0) + len(neu)
+    if not dateien:
+        return ""
+    return f"{dateien} Dat. {C['gr']}+{plus.group(1) if plus else 0}{C['r']} {C['red']}−{minus.group(1) if minus else 0}{C['r']}"
+
+
+def zeile(a):
+    """Eine Statuszeile für einen Auftrag — oder None, wenn er nicht angezeigt wird."""
+    base = f"http://127.0.0.1:{a.get('port') or DEFAULT_PORT}"
+    q = urllib.parse.quote(a["dir"])
+    sid = a["session"]
+    if get(base, "/doc", 0.4) is None:
+        return None
+    wartet = ""
+    for it in (get(base, f"/question?directory={q}") or []):
+        if it.get("sessionID") == sid:
+            wartet = "Frage: " + ((it.get("questions") or [{}])[0].get("question", ""))
+    for it in (get(base, f"/permission?directory={q}") or []):
+        if it.get("sessionID") == sid:
+            wartet = f"Recht: {it.get('permission')} {' '.join(it.get('patterns', []))}"
+    busy = sid in (get(base, f"/session/status?directory={q}") or {})
+    info = get(base, f"/session/{sid}?directory={q}") or {}
+    t = info.get("time", {})
+    jetzt = time.time() * 1000
+    titel = a.get("title", "").split(" ", 1)
+    nr = a.get("slug", "")[:17]
+    name = (titel[1] if titel and titel[0].startswith("#") and len(titel) > 1 else a.get("title", ""))[:32]
+    kopf = f"{nr:<17} {name:<32}"
+    if wartet:
+        return f"{C['ye']}? {C['r']}{C['b']}{kopf}{C['r']} {C['ye']}WARTET · {wartet[:60]}{C['r']}"
+    if not busy:
+        vor = (jetzt - t.get("updated", jetzt)) / 60000
+        if vor > FERTIG_SICHTBAR:
+            return None
+        pr = f" · PR #{a['pr']}" if a.get("pr") else ""
+        return f"{C['gr']}✓ {C['r']}{C['dim']}{kopf} fertig vor {vor:.0f}m{pr}{C['r']}"
+    todos = get(base, f"/session/{sid}/todo?directory={q}") or []
+    fertig = sum(1 for x in todos if x.get("status") == "completed")
+    dauer = (jetzt - t.get("created", jetzt)) / 60000
+    teile = [balken(fertig, len(todos)), diffstat(a["dir"]), f"{C['dim']}{dauer:.0f}m{C['r']}"]
+    return f"{C['cy']}▶ {C['r']}{C['b']}{kopf}{C['r']} " + "  ".join(x for x in teile if x)
+
+
+def main():
+    """Zeilen berechnen oder aus dem frischen Zwischenspeicher holen."""
+    try:
+        if time.time() - os.path.getmtime(CACHE) < FRISCH:
+            sys.stdout.write(open(CACHE).read())
+            return
+    except OSError:
+        pass
+    zeilen = [z for z in (zeile(a) for a in auftraege()) if z]
+    text = "\n".join(zeilen)
+    try:
+        with open(CACHE, "w") as f:
+            f.write(text)
+    except OSError:
+        pass
+    sys.stdout.write(text)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except Exception:
+        pass
