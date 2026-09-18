@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """oc-statusline — OpenCode-Aufträge in der Claude-Code-Statusleiste.
 
-Eine Zeile je Auftrag, der läuft, wartet oder in der letzten Stunde fertig
-wurde:
+Eine Zeile je Auftrag, der läuft oder auf eine Antwort wartet — Fertiges
+erscheint nicht (Wunsch: nur aktive Sitzungen unten sehen):
 
   ▶ 276  Bestellung erst nach Zahlung  ███████░░░ 14/18  14 Dat. +179 −67  2,38 $  41m
   ? 301  Tests Abholzeiten             WARTET: Soll der Reaper …
-  ✓ 288  Produktkarten-Vorschau        fertig vor 12m
 
 Gedacht als ANHANG unter eine bestehende Statuszeile (`oc-statusline-wrap`).
 
@@ -27,7 +26,6 @@ STATE = os.environ.get("OC_STATE", os.path.expanduser("~/.local/state/oc-auftrag
 CACHE = os.path.join(STATE, ".statusline-cache")
 DEFAULT_PORT = os.environ.get("OC_PORT", "4096")
 FRISCH = 5          # Sekunden, die ein berechnetes Bild wiederverwendet wird
-FERTIG_SICHTBAR = 60  # Minuten, die ein fertiger Auftrag noch angezeigt wird
 
 C = {"cy": "\033[36m", "ye": "\033[33m", "gr": "\033[32m", "dim": "\033[2m", "b": "\033[1m", "r": "\033[0m", "red": "\033[31m"}
 
@@ -110,11 +108,7 @@ def zeile(a):
     if wartet:
         return f"{C['ye']}? {C['r']}{C['b']}{kopf}{C['r']} {C['ye']}WARTET · {wartet[:60]}{C['r']}"
     if not busy:
-        vor = (jetzt - t.get("updated", jetzt)) / 60000
-        if vor > FERTIG_SICHTBAR:
-            return None
-        pr = f" · PR #{a['pr']}" if a.get("pr") else ""
-        return f"{C['gr']}✓ {C['r']}{C['dim']}{kopf} fertig vor {vor:.0f}m{pr}{C['r']}"
+        return None
     todos = get(base, f"/session/{sid}/todo?directory={q}") or []
     fertig = sum(1 for x in todos if x.get("status") == "completed")
     dauer = (jetzt - t.get("created", jetzt)) / 60000
@@ -149,8 +143,8 @@ def breite():
 
 
 def rechts(zeilen):
-    """Zeilen rechtsbündig setzen (OC_STATUSLINE_ALIGN=left schaltet ab)."""
-    if os.environ.get("OC_STATUSLINE_ALIGN", "right") != "right":
+    """Zeilen rechtsbündig setzen, nur mit OC_STATUSLINE_ALIGN=right (Standard: links)."""
+    if os.environ.get("OC_STATUSLINE_ALIGN", "left") != "right":
         return zeilen
     w = breite()
     if not w:

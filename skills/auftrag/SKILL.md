@@ -62,6 +62,8 @@ Werkzeug: `OC=${CLAUDE_PLUGIN_ROOT}/scripts/oc` (Hilfe: `$OC` ohne Argument).
 7. **Abschluss:** commit nach den Konventionen des Projekts, push, PR mit Testanleitung und ehrlich markierten Lücken. `opencode.json` NIE committen. Danach `$OC close <slug>` (Worker beendet, Tab schließt sich).
 8. **Aufräumen** nach dem Merge: `$OC done <slug>` (worktree weg, Branch bleibt).
 
+**Wann eine Sitzung endet, entscheidet Claude** — ohne Rückfrage: Ist der PR angelegt und keine Korrektur mehr offen, sofort `$OC close <slug>`. Offene Worker kosten nichts, stehen aber in Statusleiste, Vibe Island und Tab-Leiste und verdecken, was wirklich läuft. Nur wenn eine Korrektur absehbar ist (Review steht aus, Frage an den Menschen offen), bleibt der Worker offen.
+
 Übersicht: `/oc:status` im Chat, `/oc:board` als Live-Tab (`/oc:board-zu` schließt), Statuszeile `OC 2▶ 1? 3✓` (siehe README).
 
 ## Vorlage Auftrag

@@ -394,7 +394,11 @@ cmd_board_zu() {
 cmd_done() {
   local slug="$1" dir repo
   dir=$(state_get "$slug" dir); repo=$(state_get "$slug" repo); [ -n "$dir" ] || die "unbekannter Auftrag: $slug"
+  # Nie das Haupt-Repo als worktree entfernen — nur Ordner unter WT_ROOT.
+  case "$dir" in "$WT_ROOT"/*) ;; *) die "$dir liegt nicht unter $WT_ROOT — worktree wird NICHT entfernt";; esac
   cmd_close "$slug" >/dev/null
+  # Altbestand (attach an gemeinsamen Server): den attach-Prozess beenden.
+  pkill -f "opencode attach .*-s $(state_get "$slug" session)" 2>/dev/null; sleep 1; close_dead_tabs
   git -C "${repo:-$REPO}" worktree remove --force "$dir" && rm -f "$STATE/$slug.env" && echo "worktree entfernt: $dir (Branch bleibt)"
 }
 
