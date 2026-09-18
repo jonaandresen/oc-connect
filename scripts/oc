@@ -39,6 +39,10 @@
 # OC_BASE_REF (origin/HEAD), OC_COPY (".env backend/.env frontend/.env"),
 # OC_TEST_MODEL (opencode-go/deepseek-v4.1-flash), OC_TERMINAL (auto).
 
+# Alles in { … } und `exit` in derselben Zeile: Bash liest Skripte stückweise;
+# wird die Datei während eines langen `oc wait` bearbeitet, las es sonst mitten
+# in den neuen Text hinein (gemessen: „syntax error near unexpected token“).
+{
 set -u
 
 PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -284,24 +288,7 @@ cmd_start() {
 # Sitzung auf `busy` stehen, obwohl sie auf uns wartet — ohne diese Prüfung
 # liefe `wait` bis ins Zeitlimit. Ausgabe leer = nichts offen.
 pending_for() {
-  local sid="$1" dir="$2" BASE="${3:-$BASE}"
-  { curl -s "$BASE/question?directory=$dir"; echo; curl -s "$BASE/permission?directory=$dir"; } | python3 -c '
-import json,sys
-sid=sys.argv[1]
-for line in sys.stdin.read().split("\n"):
-    line=line.strip()
-    if not line: continue
-    try: items=json.loads(line)
-    except Exception: continue
-    for it in items if isinstance(items,list) else []:
-        if it.get("sessionID")!=sid: continue
-        if it["id"].startswith("que"):
-            for q in it.get("questions",[]):
-                opts=" | ".join(o.get("label","") for o in q.get("options",[]))
-                print(f"FRAGE {it[\"id\"]}: {q.get(\"question\",\"\")}  [Optionen: {opts}]")
-        else:
-            print(f"RECHT {it[\"id\"]}: {it.get(\"permission\")} {\" \".join(it.get(\"patterns\",[]))}")
-' "$sid"
+  python3 "$PLUGIN_ROOT/scripts/oc-pending.py" "${3:-$BASE}" "$2" "$1"
 }
 
 cmd_answer() {
@@ -419,3 +406,5 @@ case "${1:-}" in
   permit)   shift; cmd_permit "$@" ;;
   *) sed -n '2,42p' "$0"; exit 1 ;;
 esac
+exit $?
+}
