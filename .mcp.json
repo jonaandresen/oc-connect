@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "opencode": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/oc",
+      "args": ["mcp"],
+      "env": { "OC_AUTONOMY": "${user_config.autonomy}" }
+    }
+  }
+}

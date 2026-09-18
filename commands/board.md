@@ -1,7 +1,5 @@
 ---
-description: Live-Übersicht aller OpenCode-Aufträge als Terminal-Tab öffnen
-allowed-tools: Bash(${CLAUDE_PLUGIN_ROOT}/scripts/oc:*)
+description: Open the live board of all OpenCode jobs in a new terminal tab
+allowed-tools: Bash(oc board-tab), Bash(*/bin/oc board-tab)
 ---
-Führe aus: `${CLAUDE_PLUGIN_ROOT}/scripts/oc board`
-
-Melde in einem Satz, ob der Tab „OC Board“ geöffnet wurde oder schon lief. Im Board: `q` beendet, Ziffer 1–9 öffnet den jeweiligen Auftrag als Tab.
+Run `"${CLAUDE_PLUGIN_ROOT}/bin/oc" board-tab` and report in one sentence whether the tab opened. In the board, `q` quits and `1`-`9` opens a job's tab.

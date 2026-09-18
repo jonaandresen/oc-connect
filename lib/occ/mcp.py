@@ -1,0 +1,234 @@
+"""MCP server (stdio) that exposes oc-connect to Claude Code.
+
+Why an MCP server and not only a skill: a skill is loaded when its description
+matches, so Claude may never think of OpenCode. The server's tools and its
+``instructions`` are present in every session, which is what lets Claude decide
+on its own when a task is worth delegating.
+
+Minimal JSON-RPC 2.0 over newline-delimited stdio, standard library only.
+Nothing may be printed to stdout except protocol messages.
+"""
+from __future__ import annotations
+
+import io
+import json
+import os
+import sys
+import traceback
+from contextlib import redirect_stdout
+from typing import Any, Callable, Dict
+
+from . import core, ops
+from .core import OcError
+
+AUTONOMY = (os.environ.get("OC_AUTONOMY") or "mechanical").strip().lower()
+
+_AUTONOMY_RULES = {
+    "off": "Never delegate on your own. Use these tools only when the user explicitly asks for OpenCode.",
+    "ask": "Before delegating, ask the user in one short question (recommend yes or no). "
+           "Explicit user requests (\"do this with OpenCode\") need no question.",
+    "mechanical": "Delegate WITHOUT asking when the task is well-bounded implementation work: writing or "
+                  "extending tests, mechanical refactors and renames, small UI/frontend changes, docs, "
+                  "follow-up fixes with a clear spec. Say in one line that you delegated and to which agent. "
+                  "For larger or cross-cutting work, ask first in one short question with your recommendation.",
+    "auto": "Delegate on your own judgement whenever a well-specified implementation task would otherwise "
+            "cost you significant effort. Say in one line that you delegated and to which agent.",
+}
+
+
+def instructions() -> str:
+    setup = core.opencode_setup()
+    agents = setup["agents"]
+    if setup["oh_my_opencode"]:
+        agent_line = ("Agents (oh-my-opencode): pick per job. `fixer` for small mechanical work (cheapest), "
+                      "`designer` for UI, `orchestrator` for larger multi-file work. "
+                      "You are the orchestrator: your task already contains the plan, so prefer `fixer` "
+                      "unless the work is large. Models: "
+                      + ", ".join(f"{k}={v}" for k, v in agents.items()) + ".")
+    else:
+        agent_line = "Agent: OpenCode's built-in `build` (oh-my-opencode not installed; that is fine)."
+    return f"""oc-connect lets you hand implementation tasks to OpenCode workers running on cheaper models.
+Each job gets its own git worktree, its own OpenCode process and its own terminal tab the user can watch
+(session trackers such as Vibe Island show every job). Workers cannot commit, push, run docker or ssh.
+
+WHEN TO DELEGATE ({AUTONOMY}): {_AUTONOMY_RULES.get(AUTONOMY, _AUTONOMY_RULES['mechanical'])}
+Good fits: bounded implementation with a clear spec you can write down. Bad fits: exploration or
+questions (a Claude subagent is cheaper, since you would review the worker's output anyway), anything
+touching money, payments, auth, security or data deletion, and tasks with an open product decision.
+Treat OpenCode as an alternative to spawning an implementation subagent, not to research subagents.
+If the user says "do this with OpenCode" (or similar), always delegate that task.
+
+HOW: 1) Research first and write a precise task (files with lines, required behaviour, tests, what must
+not change, the project's check commands). The skill `oc:delegate` has the full template - load it
+before your first delegation in a session. 2) the `delegate` tool. 3) Optionally start the `oc:opencode-worker`
+agent in the background (description "oc <slug>") so the job appears in the Claude Code agent panel.
+4) The oc-connect monitor notifies you when a job asks something, finishes or dies - you do not need to poll.
+Answer worker questions yourself when code or task settle them (`answer`); forward product, legal
+or money questions to the user. 5) When done: `report`, then REVIEW - read the full diff, run all
+checks yourself, do a defeat test, look for untested cases. Send corrections with `send`.
+6) You commit and open the PR; then `set_pr` and `close`. After merge: `done`.
+{agent_line}"""
+
+
+def _slug_schema(desc: str = "job slug, e.g. issue number or short name") -> Dict[str, Any]:
+    return {"type": "string", "description": desc}
+
+
+TOOLS: Dict[str, Dict[str, Any]] = {
+    "delegate": {
+        "description": "Start an OpenCode worker on a task: new git worktree + branch, own terminal tab, "
+                       "OpenCode session, task sent. Returns immediately; the monitor reports progress.",
+        "inputSchema": {"type": "object", "required": ["slug", "task"], "properties": {
+            "slug": _slug_schema("short id used for worktree, tab and branch, e.g. '276' or 'tests-cart'"),
+            "task": {"type": "string", "description": "complete task text for the worker (markdown)"},
+            "title": {"type": "string", "description": "session title, e.g. '#276 Show orders only after payment'"},
+            "agent": {"type": "string", "description": "OpenCode agent; subagents such as oh-my-opencode's "
+                                                       "fixer work (default depends on setup)"},
+            "model": {"type": "string", "description": "provider/model override; normally leave empty"},
+            "branch": {"type": "string", "description": "branch name (default oc/<slug>)"},
+            "base": {"type": "string", "description": "git ref to start from (default origin/HEAD)"},
+            "repo": {"type": "string", "description": "repository path (default: current project)"},
+        }},
+    },
+    "status": {
+        "description": "State of all OpenCode jobs (running / waiting / done / stopped), with todos, "
+                       "last activity, diff size, cost and open questions.",
+        "inputSchema": {"type": "object", "properties": {}},
+        "annotations": {"readOnlyHint": True},
+    },
+    "report": {
+        "description": "Final message, cost and git status of a job. Read this, then review the diff yourself.",
+        "inputSchema": {"type": "object", "required": ["slug"], "properties": {"slug": _slug_schema()}},
+        "annotations": {"readOnlyHint": True},
+    },
+    "send": {
+        "description": "Send a follow-up message (e.g. review findings to fix) into the job's session.",
+        "inputSchema": {"type": "object", "required": ["slug", "message"], "properties": {
+            "slug": _slug_schema(), "message": {"type": "string"}}},
+    },
+    "answer": {
+        "description": "Answer a worker's open question. One answer per sub-question, in order; "
+                       "use an option label or free text.",
+        "inputSchema": {"type": "object", "required": ["slug", "answers"], "properties": {
+            "slug": _slug_schema(), "answers": {"type": "array", "items": {"type": "string"}}}},
+    },
+    "permit": {
+        "description": "Answer a worker's permission request: once, always or reject. Reject anything "
+                       "the guard would forbid in spirit.",
+        "inputSchema": {"type": "object", "required": ["slug", "reply"], "properties": {
+            "slug": _slug_schema(), "reply": {"type": "string", "enum": ["once", "always", "reject"]}}},
+    },
+    "open": {
+        "description": "Open the job's terminal tab for the user (restarts a stopped worker, same session).",
+        "inputSchema": {"type": "object", "required": ["slug"], "properties": {"slug": _slug_schema()}},
+    },
+    "close": {
+        "description": "Stop a job's worker (its tab closes). Worktree and session stay. "
+                       "Do this once the PR exists and no correction is pending.",
+        "inputSchema": {"type": "object", "required": ["slug"], "properties": {"slug": _slug_schema()}},
+    },
+    "done": {
+        "description": "Stop the worker and remove the job's worktree (branch stays). Use after merge.",
+        "inputSchema": {"type": "object", "required": ["slug"], "properties": {"slug": _slug_schema()}},
+        "annotations": {"destructiveHint": True},
+    },
+    "set_pr": {
+        "description": "Record the pull request of a job so status views show it.",
+        "inputSchema": {"type": "object", "required": ["slug", "pr"], "properties": {
+            "slug": _slug_schema(), "pr": {"type": "string", "description": "e.g. '#303'"}}},
+    },
+    "setup": {
+        "description": "Show the local OpenCode setup: version, plugins, agents with models, default agent.",
+        "inputSchema": {"type": "object", "properties": {}},
+        "annotations": {"readOnlyHint": True},
+    },
+}
+
+
+def _project_dir() -> str:
+    return os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
+
+
+def _status_text(_: Dict[str, Any]) -> str:
+    rows = ops.status_all(detail=True)
+    if not rows:
+        return "no jobs"
+    return json.dumps(rows, indent=1, default=str)
+
+
+def _setup_text(_: Dict[str, Any]) -> str:
+    return json.dumps(core.opencode_setup(), indent=1)
+
+
+HANDLERS: Dict[str, Callable[[Dict[str, Any]], str]] = {
+    "delegate": lambda a: ops.start(a["slug"], a["task"], title=a.get("title"), branch=a.get("branch"),
+                                       agent=a.get("agent"), repo=a.get("repo"), base=a.get("base"),
+                                       cwd=_project_dir(), model=a.get("model"))
+                   + f"\n\nNext: optionally start agent `oc:opencode-worker` in the background with description "
+                     f"\"oc {a['slug']}\" for the agent panel. The monitor will notify you.",
+    "status": _status_text,
+    "report": lambda a: ops.report(a["slug"]),
+    "send": lambda a: ops.send(a["slug"], a["message"]),
+    "answer": lambda a: ops.answer(a["slug"], a["answers"]),
+    "permit": lambda a: ops.permit(a["slug"], a["reply"]),
+    "open": lambda a: ops.open_(a["slug"]),
+    "close": lambda a: ops.close(a["slug"]),
+    "done": lambda a: ops.done(a["slug"]),
+    "set_pr": lambda a: ops.set_pr(a["slug"], a["pr"]),
+    "setup": _setup_text,
+}
+
+
+def handle(msg: Dict[str, Any]) -> Any:
+    """Return the JSON-RPC result for a request, or raise."""
+    method = msg.get("method")
+    params = msg.get("params") or {}
+    if method == "initialize":
+        return {"protocolVersion": params.get("protocolVersion", "2025-06-18"),
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "opencode", "version": core.VERSION},
+                "instructions": instructions()}
+    if method == "ping":
+        return {}
+    if method == "tools/list":
+        return {"tools": [dict(name=n, **spec) for n, spec in TOOLS.items()]}
+    if method == "tools/call":
+        name = params.get("name")
+        if name not in HANDLERS:
+            return {"isError": True, "content": [{"type": "text", "text": f"unknown tool {name}"}]}
+        buf = io.StringIO()
+        try:
+            with redirect_stdout(buf):  # never let a stray print corrupt the protocol
+                text = HANDLERS[name](params.get("arguments") or {})
+            return {"content": [{"type": "text", "text": text}]}
+        except OcError as exc:
+            return {"isError": True, "content": [{"type": "text", "text": f"ERROR: {exc}"}]}
+        except KeyError as exc:
+            return {"isError": True, "content": [{"type": "text", "text": f"missing argument {exc}"}]}
+        except Exception as exc:  # report, do not crash the server
+            traceback.print_exc(file=sys.stderr)
+            return {"isError": True, "content": [{"type": "text", "text": f"ERROR: {type(exc).__name__}: {exc}"}]}
+    raise LookupError(method)
+
+
+def main() -> None:
+    core.migrate_legacy()
+    out = sys.stdout
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except ValueError:
+            continue
+        if "id" not in msg:        # notification, e.g. notifications/initialized
+            continue
+        try:
+            reply = {"jsonrpc": "2.0", "id": msg["id"], "result": handle(msg)}
+        except LookupError:
+            reply = {"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32601, "message": "method not found"}}
+        except Exception as exc:
+            reply = {"jsonrpc": "2.0", "id": msg["id"], "error": {"code": -32603, "message": str(exc)}}
+        out.write(json.dumps(reply) + "\n")
+        out.flush()

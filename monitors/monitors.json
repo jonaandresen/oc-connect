@@ -1,0 +1,7 @@
+[
+  {
+    "name": "jobs",
+    "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/oc monitor",
+    "description": "OpenCode jobs: questions, finished, stopped"
+  }
+]

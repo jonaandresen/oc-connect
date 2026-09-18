@@ -1,13 +1,20 @@
 {
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "oc",
-  "version": "0.2.0",
-  "description": "Claude Code als Bauleitung für den OpenCode-Orchestrator: je Auftrag ein git worktree und ein eigener Terminal-Tab (sichtbar in Vibe Island), Live-Board, Statuszeile, Prüfung durch Claude vor jedem Commit.",
-  "author": {
-    "name": "Jona Andresen"
-  },
-  "skills": [
-    "./skills/auftrag"
-  ],
-  "license": "MIT"
+  "version": "0.3.0",
+  "description": "Claude Code as the lead, OpenCode as the workers: delegate bounded coding tasks to OpenCode, one git worktree and one terminal tab per job (visible in Vibe Island and similar trackers), live status in Claude Code, and Claude reviews every diff before anything is committed.",
+  "author": { "name": "Jona Andresen" },
+  "homepage": "https://github.com/jonaandresen/oc-connect",
+  "repository": "https://github.com/jonaandresen/oc-connect",
+  "license": "MIT",
+  "keywords": ["opencode", "delegation", "worktree", "agents", "orchestration"],
+  "userConfig": {
+    "autonomy": {
+      "type": "string",
+      "title": "When may Claude delegate on its own?",
+      "description": "mechanical: bounded work (tests, docs, small UI) without asking, larger work after one question. ask: always ask. auto: Claude decides. off: only when you say so.",
+      "options": ["mechanical", "ask", "auto", "off"],
+      "default": "mechanical"
+    }
+  }
 }
