@@ -1,0 +1,415 @@
+#!/bin/bash
+# oc — Mechanik des Plugins opencode-bauleitung.
+#
+# Claude schreibt den Auftrag; dieses Skript erledigt den Rest reproduzierbar:
+# OpenCode-Server sicherstellen, git worktree anlegen, Sitzung erzeugen,
+# Auftrag schicken, Terminal-TAB zum Zuschauen öffnen, auf Fertig warten.
+#
+# Bewusst NICHT hier: Prüfen, Committen, PR — das macht Claude nach dem Lesen
+# des Diffs. Die Worker dürfen es technisch gar nicht: Die opencode.json im
+# Repo sperrt git commit/push, docker, ssh usw. (`oc init`, `oc selftest`).
+#
+# ARCHITEKTUR: Ein Auftrag = ein Terminal-Tab = ein eigener OpenCode-Prozess
+# auf eigenem Port (4101…). Der Tab läuft NICHT als `attach` an einem
+# gemeinsamen Server, sondern ist selbst der Server. Grund: Plugins wie Vibe
+# Island laufen im Serverprozess und ordnen Sitzungen über dessen Terminal zu —
+# ein gemeinsamer Hintergrund-Server ohne TTY ließ alle Aufträge als EINE
+# Sitzung erscheinen. Nebeneffekt: Tab schließen = Worker beenden.
+# Alt-Aufträge ohne `port=` in der Zustandsdatei laufen weiter über OC_PORT.
+#
+# Läuft mit macOS-Bash 3.2 (keine assoziativen Arrays, kein mapfile).
+#
+#   oc setup                                       zeigt das OpenCode-Setup (Plugins, Agenten, Skills)
+#   oc init                                        Sperr-Config ins Repo (lokal, nie committet)
+#   oc selftest                                    prüft mit billigem Modell, dass die Sperren greifen
+#   oc start  <slug> <branch> <titel> <auftrag.md> worktree + Sitzung + Auftrag + Tab
+#   oc send   <slug> <nachricht.md>                Korrektur in dieselbe Sitzung
+#   oc wait   <slug> [max_minuten]                 blockiert bis idle, druckt Abschlussmeldung
+#   oc open   <slug>                               Tab (erneut) öffnen
+#   oc status                                      alle Aufträge: busy/idle, Titel
+#   oc done   <slug>                               worktree entfernen (Branch bleibt)
+#   oc answer <slug> <antwort> [..]                offene Rückfrage beantworten (Label oder Freitext)
+#   oc permit <slug> once|reject                   offene Rechte-Anfrage beantworten
+#   oc close  <slug>                               Worker beenden, Tab schließt sich
+#   oc board | board-zu                            Live-Übersicht als Tab öffnen / schließen
+#
+# Umgebung: OC_REPO (Default: Haupt-worktree des aktuellen git-Repos),
+# OC_WT_ROOT (Default: <repo>-worktrees), OC_PORT (4096), OC_AGENT (orchestrator),
+# OC_BASE_REF (origin/HEAD), OC_COPY (".env backend/.env frontend/.env"),
+# OC_TEST_MODEL (opencode-go/deepseek-v4.1-flash), OC_TERMINAL (auto).
+
+set -u
+
+PLUGIN_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+PORT="${OC_PORT:-4096}"
+BASE="http://127.0.0.1:$PORT"
+# Standard-Agent: der Orchestrator von oh-my-opencode-slim, falls installiert,
+# sonst OpenCodes eingebauter `build`.
+if [ -z "${OC_AGENT:-}" ] && grep -qs "oh-my-opencode" "$HOME/.config/opencode/opencode.json" "$HOME/.config/opencode/opencode.jsonc"; then
+  AGENT="orchestrator"
+else
+  AGENT="${OC_AGENT:-build}"
+fi
+STATE="${OC_STATE:-$HOME/.local/state/oc-auftrag}"
+mkdir -p "$STATE"
+
+die() { echo "FEHLER: $*" >&2; exit 1; }
+
+# Haupt-worktree des Repos, in dem wir stehen — nicht ein Neben-worktree,
+# sonst landeten neue worktrees in einem worktree.
+repo_root() {
+  if [ -n "${OC_REPO:-}" ]; then echo "$OC_REPO"; return; fi
+  local common
+  common=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) || die "kein git-Repo (OC_REPO setzen)"
+  dirname "$common"
+}
+REPO="$(repo_root)"
+WT_ROOT="${OC_WT_ROOT:-${REPO}-worktrees}"
+# Ausgangsstand neuer worktrees: der Standard-Branch des Remotes (origin/HEAD).
+BASE_REF="${OC_BASE_REF:-$(git -C "$REPO" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null || echo origin/main)}"
+# Unversionierte Dateien, die ein worktree zum Laufen braucht (z. B. .env).
+# Leerzeichen-getrennt, relativ zum Repo; fehlende werden übersprungen.
+COPY_FILES="${OC_COPY:-.env backend/.env frontend/.env}"
+
+state_get() { grep "^$2=" "$STATE/$1.env" 2>/dev/null | head -1 | cut -d= -f2-; }
+# Server-Adresse eines Auftrags: eigener Port, sonst der gemeinsame (Altbestand).
+base_of() { local p; p=$(state_get "$1" port); echo "http://127.0.0.1:${p:-$PORT}"; }
+alive() { curl -s -m 1 -o /dev/null "$1/doc"; }
+# Erster freier Port ab 4101 — frei heißt: niemand antwortet und niemand lauscht.
+free_port() {
+  local p
+  for p in $(seq 4101 4199); do
+    alive "http://127.0.0.1:$p" && continue
+    lsof -nP -iTCP:"$p" -sTCP:LISTEN >/dev/null 2>&1 && continue
+    echo "$p"; return
+  done
+  die "kein freier Port 4101–4199"
+}
+json_str() { python3 -c 'import json,sys;print(json.dumps(sys.argv[1]))' "$1"; }
+
+# Startet `opencode serve`, falls auf dem Port nichts antwortet. OPENCODE_CONFIG
+# zeigt auf die opencode.json des Repos: Nur so gelten die Sperren auch in
+# worktrees, die die Datei nicht selbst tragen.
+ensure_server() {
+  curl -s -o /dev/null "$BASE/doc" && return 0
+  [ -f "$REPO/opencode.json" ] || die "$REPO/opencode.json fehlt — erst 'oc init'"
+  (cd "$REPO" && OPENCODE_CONFIG="$REPO/opencode.json" nohup opencode serve --port "$PORT" >"$STATE/server.log" 2>&1 &)
+  local i; for i in $(seq 1 40); do curl -s -o /dev/null "$BASE/doc" && return 0; sleep 0.5; done
+  die "Server startet nicht, siehe $STATE/server.log"
+}
+
+# Schließt beendete OC-Tabs in Terminal.app. Nötig, weil Terminal einen Tab nach
+# Prozessende stehen lässt und dabei seine Geräte-Kennung (ttysNNN) behält;
+# der nächste Tab bekommt dieselbe Kennung, und Vibe Island — das über die
+# Kennung springt — landete im toten Tab (gemessen: Klick auf den Worker führte
+# ins beendete Board). Nur Tabs mit Titel „OC…“ und ohne laufenden Prozess.
+close_dead_tabs() {
+  [ "${OC_TERMINAL:-${TERM_PROGRAM:-}}" = "Apple_Terminal" ] || return 0
+  osascript >/dev/null 2>&1 <<'EOF2'
+tell application "Terminal"
+  repeat with w in (every window)
+    try
+      set t to selected tab of w
+      if (custom title of t) starts with "OC" and not (busy of t) then close w
+    end try
+  end repeat
+end tell
+EOF2
+}
+
+# Öffnet einen TAB im Terminal, in dem Claude läuft. Je Programm der Weg, der
+# ohne Fenster auskommt; nur wenn keiner greift, ein neues Fenster.
+open_tab() {
+  local title="$1" cmd="$2" term="${OC_TERMINAL:-${TERM_PROGRAM:-}}"
+  close_dead_tabs
+  if [ -n "${TMUX:-}" ]; then
+    tmux new-window -n "$title" "$cmd" && { echo "tmux-Fenster: $title"; return; }
+  fi
+  case "$term" in
+    WezTerm)
+      wezterm cli spawn -- bash -lc "$cmd" >/dev/null && { echo "WezTerm-Tab: $title"; return; } ;;
+    kitty|xterm-kitty)
+      kitty @ launch --type=tab --tab-title "$title" bash -lc "$cmd" >/dev/null && { echo "kitty-Tab: $title"; return; } ;;
+    iTerm.app)
+      osascript >/dev/null 2>&1 <<EOF && { echo "iTerm-Tab: $title"; return; }
+tell application "iTerm2"
+  tell current window
+    set t to (create tab with default profile)
+    tell current session of t to write text "$cmd"
+  end tell
+end tell
+EOF
+      ;;
+    Apple_Terminal|"")
+      # Terminal.app kennt keinen AppleScript-Befehl für Tabs; es bleibt ⌘T per
+      # System Events — das braucht die Bedienungshilfen-Freigabe für Terminal.
+      osascript >/dev/null 2>&1 <<EOF && { echo "Terminal-Tab: $title"; return; }
+tell application "Terminal" to activate
+delay 0.3
+tell application "System Events" to keystroke "t" using command down
+delay 0.6
+tell application "Terminal" to do script "$cmd" in selected tab of front window
+EOF
+      ;;
+  esac
+  osascript -e "tell application \"Terminal\" to do script \"$cmd\"" >/dev/null 2>&1 \
+    && { echo "Terminal-FENSTER: $title (Tab ging nicht — bei Terminal.app: Bedienungshilfen-Freigabe)"; return; }
+  echo "Kein Terminal geöffnet. Von Hand: $cmd"
+}
+
+open_terminal() {
+  local slug="$1" dir sid port repo cmd
+  dir=$(state_get "$slug" dir); sid=$(state_get "$slug" session); port=$(state_get "$slug" port)
+  repo=$(state_get "$slug" repo); repo="${repo:-$REPO}"
+  [ -n "$dir" ] || die "unbekannter Auftrag: $slug"
+  if [ -z "$port" ]; then
+    cmd="printf '\\\\e]0;OC $slug\\\\a'; opencode attach $BASE --dir $dir -s $sid"
+  elif alive "http://127.0.0.1:$port"; then
+    echo "Worker $slug läuft schon (Port $port) — Tab ist offen."; return
+  else
+    # Wiederaufnahme nach geschlossenem Tab: gleicher Port, gleiche Sitzung.
+    cmd="cd $dir && printf '\\\\e]0;OC $slug\\\\a'; exec env OPENCODE_CONFIG=$repo/opencode.json opencode --port $port --agent $AGENT${sid:+ -s $sid}"
+  fi
+  open_tab "OC $slug" "$cmd"
+}
+
+send_file() {
+  local slug="$1" file="$2" dir sid body code BASE
+  dir=$(state_get "$slug" dir); sid=$(state_get "$slug" session); BASE=$(base_of "$slug")
+  [ -n "$sid" ] || die "unbekannter Auftrag: $slug"
+  [ -f "$file" ] || die "Datei fehlt: $file"
+  body=$(python3 -c 'import json,sys;print(json.dumps({"agent":sys.argv[1],"parts":[{"type":"text","text":open(sys.argv[2]).read()}]}))' "$AGENT" "$file")
+  code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/session/$sid/prompt_async?directory=$dir" \
+    -H 'Content-Type: application/json' --data-binary "$body")
+  [ "$code" = "204" ] || die "prompt_async lieferte HTTP $code"
+  echo "gesendet an $slug ($sid)"
+}
+
+# Zeigt, wie OpenCode auf diesem Rechner eingerichtet ist — damit Claude den
+# Auftrag an das tatsächliche Setup anpasst statt an Annahmen.
+cmd_setup() {
+  python3 - "$HOME/.config/opencode" <<'PY'
+import json,os,re,sys,glob
+base=sys.argv[1]
+def load(p):
+    try:
+        t=open(p).read(); t=re.sub(r"^\s*//.*$","",t,flags=re.M); return json.loads(t)
+    except Exception: return None
+cfg=load(os.path.join(base,"opencode.jsonc")) or load(os.path.join(base,"opencode.json")) or {}
+plugins=cfg.get("plugin",[])
+print("OpenCode-Plugins:", ", ".join(plugins) or "keine")
+omo=load(os.path.join(base,"oh-my-opencode-slim.json"))
+if omo:
+    pr=omo.get("preset"); print(f"oh-my-opencode-slim: Preset {pr}")
+    for a,v in (omo.get("presets",{}).get(pr) or {}).items():
+        v=v or {}; print(f"  {a:<13} {v.get('model','?')} {v.get('variant') or ''}")
+sp=glob.glob(os.path.expanduser("~/.cache/opencode/packages/superpowers*"))
+if any("superpowers" in p for p in plugins) or sp:
+    skills=sorted({os.path.basename(os.path.dirname(f)) for d in sp for f in glob.glob(d+"/**/skills/*/SKILL.md",recursive=True)})
+    print("superpowers:", ", ".join(skills) or "installiert")
+loc=sorted(os.path.basename(d) for d in glob.glob(os.path.join(base,"skills","*")))
+print("Lokale OpenCode-Skills:", ", ".join(loc) or "keine")
+PY
+  echo "Standard-Agent für Aufträge: $AGENT"
+}
+
+cmd_init() {
+  local ex
+  if [ -f "$REPO/opencode.json" ]; then echo "vorhanden: $REPO/opencode.json (nicht überschrieben)"
+  else cp "$PLUGIN_ROOT/templates/opencode.json" "$REPO/opencode.json" && echo "angelegt: $REPO/opencode.json"; fi
+  ex="$(git -C "$REPO" rev-parse --path-format=absolute --git-common-dir)/info/exclude"
+  grep -qx "opencode.json" "$ex" 2>/dev/null || { echo "opencode.json" >> "$ex"; echo "in .git/info/exclude eingetragen (wird nie committet)"; }
+}
+
+cmd_selftest() {
+  local dir sid out model="${OC_TEST_MODEL:-opencode-go/deepseek-v4.1-flash}"
+  ensure_server
+  dir="$REPO"
+  sid=$(curl -s -X POST "$BASE/session?directory=$dir" -H 'Content-Type: application/json' -d '{"title":"oc selftest (Sperren)"}' \
+    | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])') || die "Sitzung anlegen"
+  out=$(curl -s --max-time 240 -X POST "$BASE/session/$sid/message?directory=$dir" -H 'Content-Type: application/json' \
+    -d "$(python3 -c 'import json,sys;p,m=sys.argv[1].split("/",1);print(json.dumps({"agent":"build","model":{"providerID":p,"modelID":m},"parts":[{"type":"text","text":"Sperren-Test. Führe GENAU diese Bash-Befehle einzeln aus und melde je Befehl nur LIEF oder ABGELEHNT: 1) git status --short  2) git push --dry-run origin HEAD:refs/heads/oc-selftest  3) docker ps. Keine Umwege."}]}))' "$model")")
+  curl -s -X DELETE "$BASE/session/$sid?directory=$dir" >/dev/null
+  echo "$out" | python3 -c '
+import json,sys
+d=json.load(sys.stdin); calls=[]
+for p in d.get("parts",[]):
+    if p.get("type")=="tool" and p.get("tool")=="bash":
+        st=p.get("state",{}); calls.append((st.get("input",{}).get("command",""), st.get("status")))
+# Geurteilt wird über den STATUS der Werkzeugaufrufe, nicht über den Text des
+# Modells — das könnte „abgelehnt“ schreiben, obwohl der Befehl lief.
+blocked={c:s for c,s in calls}
+for c,s in calls: print(f"  {s:>9}  {c}")
+push=[s for c,s in calls if c.startswith("git push")]
+dock=[s for c,s in calls if c.startswith("docker")]
+ok = push and dock and all(s=="error" for s in push+dock)
+print("\nERGEBNIS:", "Sperren wirken (git push + docker abgelehnt)" if ok else "NICHT BELEGT — Aufrufe oben prüfen, ggf. Modell hat sie nicht ausgeführt")'
+}
+
+cmd_start() {
+  [ $# -eq 4 ] || die "start <slug> <branch> <titel> <auftrag.md>"
+  local slug="$1" branch="$2" title="$3" file="$4" dir="$WT_ROOT/$1" sid d port base i
+  [ -f "$file" ] || die "Auftrag fehlt: $file"
+  [ -e "$dir" ] && die "worktree existiert schon: $dir"
+  [ -f "$REPO/opencode.json" ] || die "$REPO/opencode.json fehlt — erst 'oc init'"
+  git -C "$REPO" fetch -q origin || die "git fetch"
+  git -C "$REPO" worktree add -q -b "$branch" "$dir" "$BASE_REF" || die "worktree add"
+  cp "$REPO/opencode.json" "$dir/"
+  for f in $COPY_FILES; do [ -f "$REPO/$f" ] && cp "$REPO/$f" "$dir/$f"; done
+  # Abhängigkeiten in jedem Ordner mit package-lock.json (bis zwei Ebenen tief).
+  # `npm ci`, nie `npm install` — install würde die Lockdatei umschreiben.
+  find "$dir" -maxdepth 3 -name package-lock.json -not -path "*/node_modules/*" | while read -r lock; do
+    d=$(dirname "$lock"); echo "npm ci in ${d#$dir/} …"
+    (cd "$d" && npm ci --no-audit --no-fund --silent >/dev/null 2>&1) || echo "WARNUNG: npm ci in $d fehlgeschlagen"
+  done
+  port=$(free_port); base="http://127.0.0.1:$port"
+  printf 'slug=%s\nbranch=%s\ntitle=%s\ndir=%s\nrepo=%s\nport=%s\n' "$slug" "$branch" "$title" "$dir" "$REPO" "$port" > "$STATE/$slug.env"
+  open_terminal "$slug"
+  for i in $(seq 1 60); do alive "$base" && break; sleep 0.5; done
+  alive "$base" || die "Worker auf Port $port antwortet nicht — Tab ansehen"
+  sid=$(curl -s -X POST "$base/session?directory=$dir" -H 'Content-Type: application/json' -d "{\"title\":$(json_str "$title")}" \
+    | python3 -c 'import json,sys;print(json.load(sys.stdin)["id"])') || die "Sitzung anlegen"
+  echo "session=$sid" >> "$STATE/$slug.env"
+  # Den TUI dieses Tabs auf die neue Sitzung schalten — trifft nur diesen Prozess.
+  curl -s -o /dev/null -X POST "$base/tui/select-session" -H 'Content-Type: application/json' -d "{\"sessionID\":\"$sid\"}"
+  send_file "$slug" "$file"
+  echo "Sitzung: $sid  ·  Port: $port"
+  echo "Browser: $base/server/$(printf '%s' "$base" | base64)/session/$sid"
+}
+
+# Offene Rückfragen (question-Werkzeug, z. B. aus superpowers:brainstorming) und
+# Rechte-Anfragen („ask“ in opencode.json) dieser Sitzung. Beides lässt die
+# Sitzung auf `busy` stehen, obwohl sie auf uns wartet — ohne diese Prüfung
+# liefe `wait` bis ins Zeitlimit. Ausgabe leer = nichts offen.
+pending_for() {
+  local sid="$1" dir="$2" BASE="${3:-$BASE}"
+  { curl -s "$BASE/question?directory=$dir"; echo; curl -s "$BASE/permission?directory=$dir"; } | python3 -c '
+import json,sys
+sid=sys.argv[1]
+for line in sys.stdin.read().split("\n"):
+    line=line.strip()
+    if not line: continue
+    try: items=json.loads(line)
+    except Exception: continue
+    for it in items if isinstance(items,list) else []:
+        if it.get("sessionID")!=sid: continue
+        if it["id"].startswith("que"):
+            for q in it.get("questions",[]):
+                opts=" | ".join(o.get("label","") for o in q.get("options",[]))
+                print(f"FRAGE {it[\"id\"]}: {q.get(\"question\",\"\")}  [Optionen: {opts}]")
+        else:
+            print(f"RECHT {it[\"id\"]}: {it.get(\"permission\")} {\" \".join(it.get(\"patterns\",[]))}")
+' "$sid"
+}
+
+cmd_answer() {
+  [ $# -ge 2 ] || die "answer <slug> <antwort> [antwort2 …]  (je offene Frage eine Antwort, in Reihenfolge)"
+  local slug="$1" dir sid qid body BASE; shift
+  dir=$(state_get "$slug" dir); sid=$(state_get "$slug" session); BASE=$(base_of "$slug")
+  qid=$(pending_for "$sid" "$dir" "$BASE" | sed -n 's/^FRAGE \([^:]*\):.*/\1/p' | head -1)
+  [ -n "$qid" ] || die "keine offene Frage in $slug"
+  body=$(python3 -c 'import json,sys;print(json.dumps({"answers":[[a] for a in sys.argv[1:]]}))' "$@")
+  curl -s -X POST "$BASE/question/$qid/reply?directory=$dir" -H 'Content-Type: application/json' -d "$body"; echo
+}
+
+cmd_permit() {
+  [ $# -eq 2 ] || die "permit <slug> once|reject"
+  local slug="$1" dir sid pid BASE
+  dir=$(state_get "$slug" dir); sid=$(state_get "$slug" session); BASE=$(base_of "$slug")
+  pid=$(pending_for "$sid" "$dir" "$BASE" | sed -n 's/^RECHT \([^:]*\):.*/\1/p' | head -1)
+  [ -n "$pid" ] || die "keine offene Rechte-Anfrage in $slug"
+  curl -s -X POST "$BASE/permission/$pid/reply?directory=$dir" -H 'Content-Type: application/json' -d "{\"reply\":\"$2\"}"; echo
+}
+
+cmd_wait() {
+  local slug="$1" max="${2:-90}" dir sid start seen=0 st pend BASE
+  dir=$(state_get "$slug" dir); sid=$(state_get "$slug" session); BASE=$(base_of "$slug")
+  [ -n "$sid" ] || die "unbekannter Auftrag: $slug"
+  start=$(date +%s)
+  while true; do
+    alive "$BASE" || { echo "== $slug: Worker-Prozess beendet (Tab geschlossen?) — 'oc open $slug' startet ihn neu"; return 3; }
+    pend=$(pending_for "$sid" "$dir" "$BASE")
+    if [ -n "$pend" ]; then
+      echo "== $slug WARTET AUF ANTWORT (nach $(( ($(date +%s) - start) / 60 )) min)"
+      echo "$pend"
+      echo "Beantworten: oc answer $slug \"<antwort>\"  |  Rechte: oc permit $slug once|reject"
+      return 2
+    fi
+    st=$(curl -s "$BASE/session/status?directory=$dir")
+    case "$st" in
+      *"$sid"*) seen=1 ;;
+      *) if [ $seen = 1 ] || [ $(( $(date +%s) - start )) -gt 60 ]; then break; fi ;;
+    esac
+    [ $(( $(date +%s) - start )) -gt $(( max * 60 )) ] && { echo "ZEITLIMIT $max min — noch busy"; break; }
+    sleep 15
+  done
+  echo "== $slug idle nach $(( ($(date +%s) - start) / 60 )) min"
+  curl -s "$BASE/session/$sid/message?directory=$dir" | python3 -c '
+import json,sys
+ms=json.load(sys.stdin); a=[m for m in ms if m["info"]["role"]=="assistant"]
+if not a: print("keine Antwort"); sys.exit()
+print("Fehler:", a[-1]["info"].get("error"))
+print("\n".join(p["text"] for p in a[-1]["parts"] if p.get("type")=="text")[-6000:])'
+  echo "== git status $dir"; git -C "$dir" status --short
+}
+
+cmd_status() {
+  local f slug dir sid st n=0
+  for f in "$STATE"/*.env; do
+    [ -e "$f" ] || break
+    n=$((n+1)); slug=$(basename "$f" .env); dir=$(state_get "$slug" dir); sid=$(state_get "$slug" session)
+    st=$(curl -s -m 2 "$(base_of "$slug")/session/status?directory=$dir" 2>/dev/null)
+    case "$st" in *"$sid"*) st=busy ;; *) st=idle ;; esac
+    alive "$(base_of "$slug")" || st=aus
+    printf '%-20s %-5s %-5s %s\n' "$slug" "$st" "$(state_get "$slug" port)" "$(state_get "$slug" title)"
+  done
+  [ $n = 0 ] && echo "keine Aufträge"
+  return 0
+}
+
+# Beendet den Worker eines Auftrags. Weil der Tab ihn per `exec` startet, endet
+# damit auch die Shell des Tabs — Terminal.app schließt ihn dann selbst (Profil-
+# Einstellung „Schließen, wenn die Shell sauber beendet wurde“, Standard).
+cmd_close() {
+  local slug="$1" port pids
+  port=$(state_get "$slug" port)
+  [ -n "$port" ] || { echo "$slug hat keinen eigenen Worker (Altbestand am gemeinsamen Server)"; return; }
+  pids=$(lsof -nP -tiTCP:"$port" -sTCP:LISTEN 2>/dev/null)
+  [ -n "$pids" ] || { echo "Worker $slug läuft nicht."; return; }
+  kill $pids && sleep 1 && close_dead_tabs && echo "Worker $slug beendet (Port $port), Tab geschlossen."
+}
+
+cmd_board() {
+  if pgrep -f "oc-board.py" >/dev/null; then echo "Board läuft schon."; return; fi
+  open_tab "OC Board" "printf '\\\\e]0;OC Board\\\\a'; exec python3 $PLUGIN_ROOT/scripts/oc-board.py"
+}
+
+cmd_board_zu() {
+  pkill -TERM -f "oc-board.py" && sleep 1
+  close_dead_tabs; echo "Board geschlossen."
+}
+
+cmd_done() {
+  local slug="$1" dir repo
+  dir=$(state_get "$slug" dir); repo=$(state_get "$slug" repo); [ -n "$dir" ] || die "unbekannter Auftrag: $slug"
+  cmd_close "$slug" >/dev/null
+  git -C "${repo:-$REPO}" worktree remove --force "$dir" && rm -f "$STATE/$slug.env" && echo "worktree entfernt: $dir (Branch bleibt)"
+}
+
+case "${1:-}" in
+  init)     cmd_init ;;
+  setup)    cmd_setup ;;
+  selftest) cmd_selftest ;;
+  start)    shift; cmd_start "$@" ;;
+  send)     shift; [ $# -eq 2 ] || die "send <slug> <datei>"; send_file "$1" "$2" ;;
+  open)     shift; open_terminal "$1" ;;
+  wait)     shift; cmd_wait "$@" ;;
+  status)   cmd_status ;;
+  done)     shift; cmd_done "$1" ;;
+  answer)   shift; cmd_answer "$@" ;;
+  close)    shift; cmd_close "$1" ;;
+  board)    cmd_board ;;
+  board-zu) cmd_board_zu ;;
+  permit)   shift; cmd_permit "$@" ;;
+  *) sed -n '2,42p' "$0"; exit 1 ;;
+esac

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "oc-plugin",
+  "description": "Claude Code als Bauleitung für OpenCode-Worker.",
+  "owner": { "name": "Jona Andresen" },
+  "plugins": [
+    {
+      "name": "oc",
+      "description": "Claude Code als Bauleitung für den OpenCode-Orchestrator: je Auftrag ein git worktree und ein eigener Terminal-Tab (sichtbar in Vibe Island), Live-Board, Statuszeile, Rückfragen erst an Claude, Prüfung durch Claude vor jedem Commit.",
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}

@@ -1,0 +1,35 @@
+#!/bin/bash
+# oc-statusline — eine Zeile für die Claude-Code-Statusleiste: „OC 2▶ 1? 3✓“.
+#
+# Wird als ANHANG an eine bestehende Statuszeile gedacht (siehe
+# `oc-statusline-wrap`), nicht als Ersatz. Muss schnell sein und darf nie
+# scheitern: Die Statusleiste wird bei jeder Antwort neu gezeichnet, und ein
+# Fehler hier darf die eigentliche Zeile nicht mitreißen. Deshalb kurze
+# Timeouts und bei stillem Server gar keine Ausgabe.
+STATE="${OC_STATE:-$HOME/.local/state/oc-auftrag}"
+BASE="http://127.0.0.1:${OC_PORT:-4096}"
+ls "$STATE"/*.env >/dev/null 2>&1 || exit 0
+curl -s -m 0.5 -o /dev/null "$BASE/doc" || exit 0
+python3 - "$STATE" "$BASE" <<'PY' 2>/dev/null
+import json,os,sys,urllib.parse,urllib.request
+state,base=sys.argv[1],sys.argv[2]
+def get(p):
+    try:
+        with urllib.request.urlopen(base+p,timeout=0.6) as r: return json.loads(r.read() or b"null")
+    except Exception: return None
+run=ask=done=0
+for f in os.listdir(state):
+    if not f.endswith(".env"): continue
+    d=dict(l.rstrip("\n").split("=",1) for l in open(os.path.join(state,f)) if "=" in l)
+    q=urllib.parse.quote(d.get("dir",""))
+    sid=d.get("session","")
+    wartet=any(i.get("sessionID")==sid for i in (get(f"/question?directory={q}") or [])+(get(f"/permission?directory={q}") or []))
+    if wartet: ask+=1
+    elif sid in (get(f"/session/status?directory={q}") or {}): run+=1
+    else: done+=1
+teile=[]
+if run: teile.append(f"\033[36m{run}▶\033[0m")
+if ask: teile.append(f"\033[33m{ask}?\033[0m")
+if done: teile.append(f"\033[2m{done}✓\033[0m")
+if teile: print("OC " + " ".join(teile), end="")
+PY

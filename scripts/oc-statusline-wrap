@@ -1,0 +1,12 @@
+#!/bin/bash
+# oc-statusline-wrap — hängt die OC-Zeile an eine bestehende Statuszeile an.
+#
+# Claude Code erlaubt nur EINEN statusLine-Befehl. Dieser Wrapper ruft den
+# bisherigen Befehl (OC_STATUSLINE_BASE) mit demselben stdin auf und setzt die
+# OC-Zeile dahinter — so bleibt die vorhandene Anzeige unverändert erhalten.
+input=$(cat)
+base_out=""
+[ -n "${OC_STATUSLINE_BASE:-}" ] && base_out=$(printf '%s' "$input" | $OC_STATUSLINE_BASE 2>/dev/null)
+oc_out=$("$(dirname "$0")/oc-statusline")
+if [ -n "$base_out" ] && [ -n "$oc_out" ]; then printf '%s  │  %s' "$base_out" "$oc_out"
+else printf '%s%s' "$base_out" "$oc_out"; fi

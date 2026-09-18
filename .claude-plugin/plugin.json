@@ -1,0 +1,13 @@
+{
+  "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
+  "name": "oc",
+  "version": "0.2.0",
+  "description": "Claude Code als Bauleitung für den OpenCode-Orchestrator: je Auftrag ein git worktree und ein eigener Terminal-Tab (sichtbar in Vibe Island), Live-Board, Statuszeile, Prüfung durch Claude vor jedem Commit.",
+  "author": {
+    "name": "Jona Andresen"
+  },
+  "skills": [
+    "./skills/auftrag"
+  ],
+  "license": "MIT"
+}
