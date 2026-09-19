@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.join(ROOT, "lib"))
 TMP_STATE = tempfile.mkdtemp(prefix="oc-test-state-")
 os.environ["OC_STATE"] = TMP_STATE
 
-from occ import core, hooks, mcp, monitor, ops, statusline  # noqa: E402
+from occ import core, hooks, mcp, monitor, ops, profile, statusline  # noqa: E402
 
 
 class FakeOpenCode(BaseHTTPRequestHandler):
@@ -264,13 +264,6 @@ class MonitorTransitions(unittest.TestCase):
                             self.st("running", cost=3.0), self.st("running", cost=4.1)])
         self.assertEqual([len(x) for x in out], [0, 1, 0, 1])
 
-    def test_watcher_suppresses_duplicate_finish(self):
-        job = dict(self.job, watcher=os.getpid())
-        out = self.run_seq([self.st("running"), self.st("done")], job=job)
-        self.assertEqual(out[1], [])
-        job = dict(self.job, watcher_until=time.time() + 60)
-        self.assertEqual(self.run_seq([self.st("running"), self.st("done")], job=job)[1], [])
-
     def test_start_reported_with_browser_link(self):
         out = self.run_seq([self.st("starting"), self.st("running")], first=False)
         self.assertIn("is running", out[1][0])
@@ -432,19 +425,6 @@ class StatusRows(unittest.TestCase):
         self.assertIsNone(statusline.row(self.st(state="done", pr="#303")))
         self.assertIsNone(statusline.row(self.st(state="stopped")))
 
-    def test_subagent_rows_only_for_worker_agents(self):
-        data = {"columns": 120, "tasks": [
-            {"id": "a", "type": "oc:opencode-worker", "description": "oc 276"},
-            {"id": "b", "type": "general-purpose", "description": "oc 276"},
-            {"id": "c", "type": "oc:opencode-worker", "description": "oc unknown"}]}
-        out = io.StringIO()
-        with mock.patch.object(statusline, "_cached_status", return_value=[self.st()]), \
-                mock.patch.object(sys, "stdin", io.StringIO(json.dumps(data))), mock.patch.object(sys, "stdout", out):
-            statusline.subagent_main()
-        rows = [json.loads(line) for line in out.getvalue().splitlines()]
-        self.assertEqual([r["id"] for r in rows], ["a"])
-        self.assertIn("276", self.plain(rows[0]["content"]))
-
 
 class McpProtocol(unittest.TestCase):
     def test_initialize_lists_instructions_and_tools(self):
@@ -463,6 +443,69 @@ class McpProtocol(unittest.TestCase):
     def test_unknown_method(self):
         with self.assertRaises(LookupError):
             mcp.handle({"id": 4, "method": "resources/list"})
+
+
+class WorkerProfile(unittest.TestCase):
+    """The workers' own OpenCode config: no user plugins, trackers and tools kept."""
+
+    def setUp(self):
+        self.user = tempfile.mkdtemp()           # stands in for ~/.config
+        self.oc = os.path.join(self.user, "opencode")
+        os.makedirs(os.path.join(self.oc, "plugins"))
+        os.makedirs(os.path.join(self.user, "gh"))
+        with open(os.path.join(self.oc, "opencode.jsonc"), "w") as fh:
+            fh.write('// comment\n{"plugin": ["oh-my-opencode-slim"], "mcp": {"pw": {"type": "local"}}, '
+                     '"permission": {"bash": "allow"}}')
+        with open(os.path.join(self.oc, "oh-my-opencode-slim.json"), "w") as fh:
+            json.dump({"preset": "p", "presets": {"p": {"fixer": {"model": "go/flash"},
+                                                          "designer": {"model": "go/kimi"}}}}, fh)
+        for name in ("vibe-island.js", "package.json"):
+            open(os.path.join(self.oc, "plugins", name), "w").close()
+        self.home = os.path.join(tempfile.mkdtemp(), "worker-home")
+        self.patches = [mock.patch.object(core, "OPENCODE_CONFIG_DIR", self.oc),
+                        mock.patch.object(profile, "USER_CONFIG", self.user),
+                        mock.patch.object(profile, "HOME", self.home)]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self.patches:
+            p.stop()
+
+    def test_config_has_primary_agents_question_tool_and_no_plugins(self):
+        cfg = profile.build_config()
+        self.assertNotIn("plugin", cfg)
+        self.assertEqual(cfg["permission"], {"question": "allow"})
+        self.assertEqual(cfg["mcp"], {"pw": {"type": "local"}})
+        self.assertEqual({a["mode"] for a in cfg["agent"].values()}, {"primary"})
+        self.assertEqual(cfg["agent"]["oc-fast"]["model"], "go/flash")
+        self.assertEqual(cfg["agent"]["oc-ui"]["model"], "go/kimi")
+        self.assertNotIn("model", cfg["agent"]["oc-strong"])  # no orchestrator role: OpenCode default
+        self.assertIn("worker-prompt.md", cfg["agent"]["oc-fast"]["prompt"])
+
+    def test_home_mirrors_other_tools_and_keeps_only_plugin_files(self):
+        home = profile.ensure_home()
+        self.assertEqual(os.readlink(os.path.join(home, "gh")), os.path.join(self.user, "gh"))
+        self.assertFalse(os.path.islink(os.path.join(home, "opencode")))
+        self.assertEqual(os.listdir(os.path.join(home, "opencode", "plugins")), ["vibe-island.js"])
+        with open(os.path.join(home, "opencode", "opencode.json")) as fh:
+            self.assertIn("oc-fast", json.load(fh)["agent"])
+        os.rmdir(os.path.join(self.user, "gh"))  # removed from ~/.config -> link goes
+        profile.ensure_home()
+        self.assertFalse(os.path.lexists(os.path.join(home, "gh")))
+
+    def test_worker_env_and_command_use_the_profile(self):
+        env = ops.worker_env()
+        self.assertEqual(env["XDG_CONFIG_HOME"], self.home)
+        cmd = ops._worker_command({"dir": "/w", "port": 4101, "agent": "oc-fast"}, "ses_1", False)
+        self.assertIn("--agent oc-fast", cmd)
+        cmd = ops._worker_command({"dir": "/w", "port": 4101, "agent": "fixer"}, "ses_1", False)
+        self.assertNotIn("--agent", cmd)  # subagents cannot be TUI agents
+
+    def test_inherit_mode_leaves_the_user_config_alone(self):
+        with mock.patch.dict(os.environ, {"OC_PROFILE": "inherit"}):
+            self.assertNotIn("XDG_CONFIG_HOME", ops.worker_env())
+            self.assertNotEqual(core.default_agent(False), "oc-fast")
 
 
 if __name__ == "__main__":

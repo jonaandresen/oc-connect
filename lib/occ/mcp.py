@@ -39,7 +39,12 @@ _AUTONOMY_RULES = {
 def instructions() -> str:
     setup = core.opencode_setup()
     agents = setup["agents"]
-    if setup["oh_my_opencode"]:
+    if setup["profile"] == "isolated":
+        agent_line = ("Workers run with oc-connect's own OpenCode profile (no oh-my-opencode, no superpowers; "
+                      "session tracker plugins stay). Agents: `oc-fast` for bounded mechanical work, `oc-strong` "
+                      "for larger multi-file work, `oc-ui` for interface work. Models: "
+                      + ", ".join(f"{k}={v}" for k, v in agents.items()) + ".")
+    elif setup["oh_my_opencode"]:
         agent_line = ("Agents (oh-my-opencode): pick per job. `fixer` for small mechanical work (cheapest), "
                       "`designer` for UI, `orchestrator` for larger multi-file work. "
                       "You are the orchestrator: your task already contains the plan, so prefer `fixer` "
@@ -86,8 +91,8 @@ TOOLS: Dict[str, Dict[str, Any]] = {
             "slug": _slug_schema("short id used for worktree, tab and branch, e.g. '276' or 'tests-cart'"),
             "task": {"type": "string", "description": "complete task text for the worker (markdown)"},
             "title": {"type": "string", "description": "session title, e.g. '#276 Show orders only after payment'"},
-            "agent": {"type": "string", "description": "OpenCode agent; subagents such as oh-my-opencode's "
-                                                       "fixer work (default depends on setup)"},
+            "agent": {"type": "string", "description": "worker agent: oc-fast (default), oc-strong, oc-ui - "
+                                                       "see the setup tool"},
             "model": {"type": "string", "description": "provider/model override; normally leave empty"},
             "branch": {"type": "string", "description": "branch name (default oc/<slug>)"},
             "base": {"type": "string", "description": "git ref to start from (default origin/HEAD)"},

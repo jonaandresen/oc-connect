@@ -1,15 +1,15 @@
-"""Job rows for Claude Code's status line and for its agent panel.
+"""Job rows for Claude Code's status line.
 
-``main`` renders one row per active job for the main status line. Claude Code
-allows only ONE ``statusLine`` command, so ``--base <cmd>`` runs the user's
-existing command with the same stdin and puts the job rows below its output.
+``main`` renders one row per active job. Claude Code allows only ONE
+``statusLine`` command, so ``--base <cmd>`` runs the user's existing command
+with the same stdin and puts the job rows below its output.
 
-``subagent_main`` implements ``subagentStatusLine``: for every row in the agent
-panel that belongs to an ``opencode-worker`` subagent (description
-``oc <slug>``), it replaces the row body with the live job state. Rows of all
-other subagents are left alone.
+There is deliberately no agent-panel row: only subagents get one, a subagent
+is a model call, and the Haiku watcher tried for it misreported the job state
+(it summarised despite being told to pass output through). The monitor
+reports every event without a model.
 
-Both run on every redraw and must never hang or fail loudly: short timeouts, a
+It runs on every redraw and must never hang or fail loudly: short timeouts, a
 small cache, and no output at all on errors.
 """
 from __future__ import annotations
@@ -29,7 +29,6 @@ FRESH_S = 4
 C = {"cy": "\033[36m", "ye": "\033[33m", "gr": "\033[32m", "red": "\033[31m", "dim": "\033[2m",
      "b": "\033[1m", "r": "\033[0m"}
 ANSI = re.compile(r"\033\[[0-9;]*m")
-SLUG_IN_DESC = re.compile(r"\boc[:\s]+([A-Za-z0-9][A-Za-z0-9._-]*)", re.I)
 
 
 def _cached_status() -> List[Dict[str, Any]]:
@@ -149,28 +148,3 @@ def main(base_cmd: Optional[str] = None) -> None:
     except Exception:
         rows = []
     sys.stdout.write("\n".join([x for x in [base_out] + rows if x]))
-
-
-def subagent_main() -> None:
-    """Replace agent-panel rows of opencode-worker subagents with the job state."""
-    try:
-        data = json.loads(sys.stdin.read() or "{}")
-    except ValueError:
-        return
-    tasks = [t for t in data.get("tasks", []) if "opencode-worker" in str(t.get("type", ""))]
-    if not tasks:
-        return
-    try:
-        by_slug = {st["slug"]: st for st in _cached_status()}
-    except Exception:
-        return
-    width = int(data.get("columns") or 100)
-    for t in tasks:
-        m = SLUG_IN_DESC.search(str(t.get("description") or "")) or SLUG_IN_DESC.search(str(t.get("label") or ""))
-        st = by_slug.get(m.group(1)) if m else None
-        if not st:
-            continue
-        body = row(st, name_width=min(17, len(st["slug"])), title_width=max(10, min(40, width - 60)))
-        if body is None:
-            body = f"{C['dim']}{st['slug']} {st['state']}{C['r']}"
-        print(json.dumps({"id": t["id"], "content": "OpenCode " + body}))

@@ -67,8 +67,6 @@ def transition(w: JobWatch, st: Dict[str, Any], job: Dict[str, Any], first: bool
     out = []
     state, prev = st["state"], w.state
     pend = tuple(p["id"] for p in st.get("pending", []))
-    watched = (core.pid_alive(job.get("watcher")) if job.get("watcher") else False) \
-        or time.time() < float(job.get("watcher_until") or 0)
 
     if first:
         # Silent start - except for what needs action now.
@@ -84,13 +82,13 @@ def transition(w: JobWatch, st: Dict[str, Any], job: Dict[str, Any], first: bool
                        "read the session before assuming what was decided")
         if state == "running" and prev == "starting":
             out.append(f"{_name(st)} is running (agent {st.get('agent')}) - browser: {ops.browser_url(job)}")
-        elif state == "done" and not watched:
+        elif state == "done":
             d = core.diffstat(st["dir"]) if st.get("dir") else {"files": 0, "plus": 0, "minus": 0}
             out.append(f"{_name(st)} finished: {d['files']} files +{d['plus']} -{d['minus']} -> `report`, "
                        "then review the diff; record it with `review` before committing")
-        elif state == "failed" and not watched:
+        elif state == "failed":
             out.append(f"{_name(st)} FAILED: {st.get('error')} -> `report`, then decide: `send` to retry or stop")
-        elif state == "stopped" and prev in ("running", "waiting", "starting") and not watched:
+        elif state == "stopped" and prev in ("running", "waiting", "starting"):
             out.append(f"{_name(st)}: worker process ended while {prev} -> `open` restarts it in the same session")
 
     if state == "running":

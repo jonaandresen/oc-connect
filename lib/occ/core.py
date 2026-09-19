@@ -22,7 +22,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 
 STATE_DIR = os.environ.get("OC_STATE") or os.path.expanduser("~/.local/state/oc-connect")
 JOBS_DIR = os.path.join(STATE_DIR, "jobs")
@@ -544,7 +544,11 @@ def opencode_setup() -> Dict[str, Any]:
         if isinstance(val, dict) and not val.get("disable"):
             agents.setdefault(name, val.get("model", "default"))
     omo_installed = any("oh-my-opencode" in p for p in plugins)
+    from . import profile  # late: profile imports core
+    if profile.mode() == "isolated":
+        agents = {name: model or "OpenCode default model" for name, model in profile.agent_models().items()}
     return {
+        "profile": profile.mode(),
         "opencode": _which("opencode"),
         "version": _opencode_version(),
         "plugins": plugins,
@@ -558,6 +562,9 @@ def opencode_setup() -> Dict[str, Any]:
 def default_agent(omo_installed: Optional[bool] = None) -> str:
     if os.environ.get("OC_AGENT"):
         return os.environ["OC_AGENT"]
+    from . import profile  # late: profile imports core
+    if profile.mode() == "isolated":
+        return "oc-fast"
     if omo_installed is None:
         omo_installed = any("oh-my-opencode" in p for p in opencode_setup_plugins())
     return "orchestrator" if omo_installed else "build"

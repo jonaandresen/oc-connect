@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.5.0
+
+- Own worker profile (default): workers get an OpenCode config of their own via `XDG_CONFIG_HOME` - none of the user's OpenCode plugins, logins, MCP servers and session-tracker plugin files kept, other tools' config mirrored. Agents `oc-fast`, `oc-strong`, `oc-ui` are primary (the tab shows the right one), take their models from oh-my-opencode roles, and share a worker prompt for this workflow. `OC_PROFILE=inherit` / option `worker_profile` keeps the old behaviour.
+- The question tool is permitted explicitly in the profile (without it the worker reported that it had none).
+- Removed the Haiku watcher agent and the agent-panel status line: the watcher summarised although told not to and reported a stale state; the plugin's `subagentStatusLine` never ran. The monitor covers every event without a model.
+
 ## 0.4.0
 
 - Guard, second layer: the worker environment rewrites every git push URL (explicit ones included) and disables docker and git over ssh. The OpenCode guard alone let `bash -c "git push"`, `command git push`, `/usr/bin/git push` and `env git push` through (measured). `oc selftest` now runs in a throw-away repo, tries indirect forms too, and judges by what reached the remote.

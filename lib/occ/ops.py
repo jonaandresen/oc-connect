@@ -22,7 +22,7 @@ import threading
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
-from . import core, terminal
+from . import core, profile, terminal
 from .core import OcError
 
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -68,6 +68,8 @@ def worker_env() -> Dict[str, str]:
     * ``GIT_SSH_COMMAND=false`` stops git over ssh.
     """
     env = {"OPENCODE_CONFIG": guard_config()}
+    if profile.mode() == "isolated":
+        env["XDG_CONFIG_HOME"] = profile.ensure_home()
     base = int(os.environ.get("GIT_CONFIG_COUNT", "0") or 0)  # keep the user's own entries
     pairs = [("remote.origin.pushurl", PUSH_DISABLED), (f"url.{PUSH_DISABLED}/.pushInsteadOf", "")]
     for i, (key, value) in enumerate(pairs):
@@ -122,9 +124,10 @@ def _worker_command(job: Dict[str, Any], session: Optional[str], install: bool) 
     ``exec`` so that closing the tab ends the worker and ending the worker
     closes the tab. ``--port`` makes the TUI process itself the HTTP server.
 
-    No ``--agent``: the TUI accepts only PRIMARY agents, and helpers such as
-    oh-my-opencode's ``fixer`` are subagents - ``opencode --agent fixer`` fails
-    for them. The HTTP API accepts them, so the agent goes with every prompt.
+    ``--agent`` only for the worker profile's own agents: the TUI accepts only
+    PRIMARY agents, and oh-my-opencode's ``fixer`` is a subagent -
+    ``opencode --agent fixer`` fails. The HTTP API accepts both, so the agent
+    also goes with every prompt.
     """
     steps = []
     if install:
@@ -134,6 +137,8 @@ def _worker_command(job: Dict[str, Any], session: Optional[str], install: bool) 
                          f"|| echo '== oc-connect: INSTALL FAILED in {rel}'")
     env = " ".join(f"{k}={shlex.quote(v)}" for k, v in worker_env().items())
     run = f"exec env {env} opencode --port {job['port']}" + (f" -s {shlex.quote(session)}" if session else "")
+    if profile.mode() == "isolated" and job.get("agent") in profile.AGENTS:
+        run += f" --agent {shlex.quote(job['agent'])}"  # primary agents: the tab shows the right one
     return "; ".join(steps + [run])
 
 
@@ -347,40 +352,28 @@ def format_pending(slug: str, pending: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-def wait(slug: str, minutes: float = 9.5, poll: float = 10, through_questions: bool = False) -> Tuple[int, str]:
-    """Block until the job needs attention.
+def wait(slug: str, minutes: float = 9.5, poll: float = 10) -> Tuple[int, str]:
+    """Block until the job needs attention - for sessions without the monitor.
 
     Exit codes: 0 done, 1 failed, 2 waiting for an answer, 3 worker stopped,
-    4 timeout (still running - call again). With ``through_questions`` open
-    questions do not end the wait (the monitor reports them); used by the
-    panel watcher, which registers itself so the monitor does not report the
-    finish twice.
+    4 timeout (still running - call again). The default stays below the
+    10-minute limit of Claude Code's Bash tool.
     """
     start_t = time.time()
-    code = -1
-    if through_questions:
-        _set(slug, watcher=os.getpid())
-    try:
-        while True:
-            st = status(slug)
-            if st["state"] == "stopped":
-                return 3, f"== {slug}: worker process ended (tab closed?) - `open` restarts it"
-            if st["state"] == "waiting" and not through_questions:
-                return 2, f"== {slug} WAITING FOR AN ANSWER\n" + format_pending(slug, st["pending"])
-            if st["state"] in ("done", "failed"):
-                code = 0 if st["state"] == "done" else 1
-                head = "finished" if code == 0 else f"FAILED: {st.get('error')}"
-                return code, f"== {slug} {head}\n" + report(slug)
-            if (time.time() - start_t) / 60 >= minutes:
-                code = 4
-                prog = f" ({st.get('todo_done')}/{st.get('todo_total')} todos)" if st.get("todo_total") else ""
-                return 4, f"== {slug} still {st['state']}{prog} - call wait again"
-            time.sleep(poll)
-    finally:
-        if through_questions:
-            # Between two calls of the watcher the pid is gone for a few
-            # seconds; the grace keeps the monitor from reporting twice.
-            _set(slug, watcher=None, watcher_until=time.time() + 90 if code == 4 else None)
+    while True:
+        st = status(slug)
+        if st["state"] == "stopped":
+            return 3, f"== {slug}: worker process ended (tab closed?) - `open` restarts it"
+        if st["state"] == "waiting":
+            return 2, f"== {slug} WAITING FOR AN ANSWER\n" + format_pending(slug, st["pending"])
+        if st["state"] in ("done", "failed"):
+            code = 0 if st["state"] == "done" else 1
+            head = "finished" if code == 0 else f"FAILED: {st.get('error')}"
+            return code, f"== {slug} {head}\n" + report(slug)
+        if (time.time() - start_t) / 60 >= minutes:
+            prog = f" ({st.get('todo_done')}/{st.get('todo_total')} todos)" if st.get("todo_total") else ""
+            return 4, f"== {slug} still {st['state']}{prog} - call wait again"
+        time.sleep(poll)
 
 
 def _set(slug: str, **fields: Any) -> None:

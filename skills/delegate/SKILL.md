@@ -26,17 +26,15 @@ Task for this invocation: $ARGUMENTS
 
 ## Choosing the agent
 
-Without oh-my-opencode, jobs go to OpenCode's `build` agent. With oh-my-opencode, pick per job and name the choice in one line:
+By default workers run with oc-connect's **own OpenCode profile**: none of the user's OpenCode plugins (no oh-my-opencode, no superpowers - their orchestration and brainstorming work against a finished plan), session-tracker plugin files and MCP servers kept, and a worker prompt with the rules of this workflow. Pick one of its agents per job and name the choice in one line:
 
-| Work | Agent | Why |
+| Work | Agent | Model |
 |---|---|---|
-| small, mechanical: tests, frontend details, docs | `fixer` | cheapest; your task already is the plan |
-| UI and styling | `designer` | set up for it |
-| larger, several files, cross-cutting | `orchestrator` | stronger model, may delegate further |
+| small, mechanical: tests, frontend details, docs, follow-up fixes | `oc-fast` | from oh-my-opencode's `fixer`, else OpenCode's default |
+| larger, several files, cross-cutting | `oc-strong` | from `orchestrator` |
+| UI and styling | `oc-ui` | from `designer` |
 
-Measured in practice: a fully planned task leaves the `orchestrator` nothing to split, so it did all the work itself on its own model. You are the orchestrator here.
-
-`fixer` and `designer` are OpenCode *subagents*. That is fine: oc-connect sends the agent with every prompt through the API. Only `opencode --agent fixer` on the command line would fail.
+The `setup` tool shows the models. With `OC_PROFILE=inherit` workers use the user's full OpenCode setup instead; then oh-my-opencode's `fixer`/`designer` work too (they are subagents - oc-connect sends the agent via the API, the tab cannot select them).
 
 ## Workflow
 
@@ -44,7 +42,6 @@ Measured in practice: a fully planned task leaves the `orchestrator` nothing to 
 2. **Write the task** using the template below.
 3. **Start:** `delegate` with `slug` (issue number or short name), `title` (starting with the issue number), `task`, and `agent`. It creates the worktree from the remote's default branch (local unpushed commits are not in it), copies git-ignored `.env` files and returns. In the background the session is created, a new terminal tab opens directly in that session, installs dependencies from lockfiles, starts the worker and gets the task.
 4. **Wait:** do nothing. The oc-connect monitor tells you when the job runs (with the browser link for the human), asks something, finishes, fails, stalls, gets expensive or its worker stops. Only jobs owned by this session are reported; leave jobs of other live Claude sessions alone. Without a monitor (non-interactive sessions): `oc wait <slug>` in Bash with `run_in_background`.
-   Optional, if the user wants the job in the agent panel: start `oc:opencode-worker` in the background with the description `oc <slug>` and the prompt `slug: <slug>`. It only waits (Haiku); the monitor then skips the duplicate finish message.
 5. **Questions come to Claude first:** the monitor gives the question id.
    - Answer yourself when the task, the code, the project rules or the issue settle it, or when it is purely technical: `answer` with that `question_id`. Permission requests: `permit` with `once` or `reject` (reject anything the guard forbids in spirit).
    - Forward to the human when it is a product, legal or money decision or the evidence conflicts: ask with your recommendation first, and send a push notification if they may be away. Then pass the answer on with `answer`.
@@ -80,7 +77,7 @@ No git commit/push/stash, no npm install, no docker, no ssh, no GitHub comments,
 Changed files, chosen approach with reason, ALL places checked (also those without changes), check results, defeat tests, what was deliberately not done, uncertainties.
 ```
 
-**If superpowers is installed in OpenCode**, the template's second paragraph matters: `brainstorming` would otherwise stop and wait for approval, `using-git-worktrees` would create another worktree, and `finishing-a-development-branch` would try to merge.
+**With `OC_PROFILE=inherit` and superpowers installed**, the template's second paragraph matters: `brainstorming` would otherwise stop and wait for approval, `using-git-worktrees` would create another worktree, and `finishing-a-development-branch` would try to merge. The own profile has no superpowers.
 
 ## Lessons from real jobs
 

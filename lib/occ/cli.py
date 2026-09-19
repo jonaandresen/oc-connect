@@ -1,7 +1,7 @@
 """Command line interface: ``oc <command>``.
 
 The same operations are exposed to Claude through the MCP server (``oc mcp``);
-the CLI exists for humans, for the worker subagent, and for scripting.
+the CLI exists for humans, for sessions without the MCP server, and for scripting.
 """
 from __future__ import annotations
 
@@ -58,6 +58,8 @@ def cmd_setup(_: argparse.Namespace) -> int:
         print("agents:")
         for name, model in s["agents"].items():
             print(f"  {name:<14} {model}")
+    print(f"worker profile: {s['profile']}" + ("  (own config, OC_PROFILE=inherit uses yours)"
+                                              if s["profile"] == "isolated" else "  (your OpenCode setup)"))
     print(f"default agent for jobs: {s['default_agent']}")
     print(f"guard config: {ops.guard_config()}")
     moved = core.migrate_legacy()
@@ -87,8 +89,6 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("wait", help="block until done/failed/waiting/stopped (exit 0/1/2/3, 4 = still running)")
     s.add_argument("slug")
     s.add_argument("minutes", nargs="?", type=float, default=9.5)
-    s.add_argument("--through-questions", action="store_true",
-                   help="keep waiting while the job asks (the monitor reports questions)")
 
     s = sub.add_parser("status", help="all jobs")
     s.add_argument("--json", action="store_true")
@@ -132,7 +132,6 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("monitor", help="print one line per job event (used by Claude Code)")
     s = sub.add_parser("statusline", help="status line rows for jobs")
     s.add_argument("--base", help="command whose output goes above the job rows")
-    sub.add_parser("subagent-statusline", help="rows for the Claude Code agent panel")
     s = sub.add_parser("install-statusline", help="add job rows under your existing Claude Code status line")
     s.add_argument("--dry-run", action="store_true")
     s = sub.add_parser("hook", help="Claude Code hook entry point")
@@ -149,7 +148,7 @@ def main(argv=None) -> int:
         elif args.cmd == "send":
             print(ops.send(args.slug, _read_task(args.file)))
         elif args.cmd == "wait":
-            code, text = ops.wait(args.slug, args.minutes, through_questions=args.through_questions)
+            code, text = ops.wait(args.slug, args.minutes)
             print(text)
             return code
         elif args.cmd == "status":
@@ -189,9 +188,6 @@ def main(argv=None) -> int:
         elif args.cmd == "statusline":
             from . import statusline
             statusline.main(args.base)
-        elif args.cmd == "subagent-statusline":
-            from . import statusline
-            statusline.subagent_main()
         elif args.cmd == "install-statusline":
             from . import hooks
             print(hooks.install_statusline(args.dry_run))
