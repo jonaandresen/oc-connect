@@ -22,7 +22,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 
 STATE_DIR = os.environ.get("OC_STATE") or os.path.expanduser("~/.local/state/oc-connect")
 JOBS_DIR = os.path.join(STATE_DIR, "jobs")
@@ -204,7 +204,8 @@ def diffstat(path: str) -> Dict[str, int]:
         stat["files"] += 1
         try:
             with open(os.path.join(path, rel), "rb") as fh:
-                stat["plus"] += fh.read().count(b"\n")
+                data = fh.read()
+            stat["plus"] += data.count(b"\n") + (1 if data and not data.endswith(b"\n") else 0)
         except OSError:
             pass
     return stat
@@ -321,7 +322,49 @@ def worker_of(job: Dict[str, Any]) -> Worker:
     return Worker(int(job.get("port") or os.environ.get("OC_PORT", 4096)), job["dir"])
 
 
+# --------------------------------------------------------------------------- processes
+
+def pid_alive(pid: Any) -> bool:
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except (OSError, ValueError, TypeError):
+        return False
+
+
+def claude_pid() -> Optional[int]:
+    """PID of the Claude Code process this process runs under, or None.
+
+    Used as the OWNER of a job: the MCP server, the monitor and Bash commands
+    of one Claude session all share this ancestor. Two sessions therefore do
+    not both react to the same worker question.
+    """
+    pid = os.getpid()
+    for _ in range(10):
+        try:
+            out = subprocess.run(["ps", "-o", "ppid=,args=", "-p", str(pid)], capture_output=True,
+                                 text=True, timeout=1).stdout.strip()
+        except (OSError, subprocess.TimeoutExpired):
+            return None
+        if not out:
+            return None
+        ppid_s, _, args = out.partition(" ")
+        prog = os.path.basename(args.split(" ", 1)[0]) if args else ""
+        if prog == "claude" or "/claude-code/" in args or args.startswith("claude "):
+            return pid
+        try:
+            pid = int(ppid_s)
+        except ValueError:
+            return None
+        if pid <= 1:
+            return None
+    return None
+
+
 # --------------------------------------------------------------------------- job status
+
+CACHE_DIR = os.path.join(STATE_DIR, "cache")
+
 
 def last_activity(msgs: List[Dict[str, Any]], directory: str) -> str:
     """Most recent meaningful tool call, e.g. ``edit: src/app.js``."""
@@ -351,22 +394,79 @@ def final_report(msgs: List[Dict[str, Any]]) -> Dict[str, Any]:
     return {"text": text, "error": info.get("error"), "cost": cost, "model": model}
 
 
+def error_text(err: Any) -> str:
+    """Short, readable form of an OpenCode message error."""
+    if not err:
+        return ""
+    if isinstance(err, dict):
+        data = err.get("data") or {}
+        msg = data.get("message") if isinstance(data, dict) else None
+        return f"{err.get('name', 'Error')}: {msg}" if msg else str(err.get("name", "Error"))
+    return str(err)[:200]
+
+
+def session_summary(w: Worker, sid: str, directory: str) -> Dict[str, Any]:
+    """Cost, model, last error and activity of a session - cached.
+
+    The full message list of a long job runs into megabytes, and status lines
+    ask every few seconds. ``GET /session/<id>`` is cheap and carries
+    ``time.updated``; the messages are only fetched again when that changed.
+    """
+    info = w.get(f"/session/{sid}") or {}
+    updated = (info.get("time") or {}).get("updated")
+    path = os.path.join(CACHE_DIR, sid + ".json")
+    if updated:
+        try:
+            with open(path) as fh:
+                cached = json.load(fh)
+            if cached.get("updated") == updated:
+                return cached
+        except (OSError, ValueError):
+            pass
+    msgs = w.messages(sid, timeout=10)
+    rep = final_report(msgs)
+    stamps = [(m.get("info", {}).get("time") or {}) for m in msgs]
+    last_ms = max([t.get("completed") or t.get("created") or 0 for t in stamps] or [0])
+    summary = {"updated": updated or last_ms, "cost": rep["cost"], "model": rep["model"],
+               "error": error_text(rep["error"]), "activity": last_activity(msgs, directory),
+               "text_tail": rep["text"][-1500:], "messages": len(msgs)}
+    if updated:
+        try:
+            os.makedirs(CACHE_DIR, exist_ok=True)
+            with open(path + ".tmp", "w") as fh:
+                json.dump(summary, fh)
+            os.replace(path + ".tmp", path)
+        except OSError:
+            pass
+    return summary
+
+
 def job_status(job: Dict[str, Any], detail: bool = False) -> Dict[str, Any]:
     """Current state of a job.
 
     ``state`` is one of:
-      * ``starting`` - no session yet
+      * ``starting`` - worker or session not up yet (dependencies may install)
       * ``running``  - the worker is busy
       * ``waiting``  - a question or permission request needs an answer
       * ``done``     - the session is idle after having worked
+      * ``failed``   - idle, but the last turn ended with an error (rate limit,
+                       provider down, aborted) or the start failed
       * ``stopped``  - the worker process is gone (tab closed)
     """
     w = worker_of(job)
+    owner = job.get("owner")
     st: Dict[str, Any] = {"slug": job["slug"], "title": job.get("title", ""), "port": job.get("port"),
                           "agent": job.get("agent"), "dir": job.get("dir"), "branch": job.get("branch"),
-                          "pr": job.get("pr"), "pending": [], "created": job.get("created")}
+                          "pr": job.get("pr"), "pending": [], "created": job.get("created"),
+                          "owner": owner, "owner_alive": pid_alive(owner) if owner else False,
+                          "reviewed": bool(job.get("review"))}
+    if job.get("start_error"):
+        st["state"], st["error"] = "failed", job["start_error"]
+        return st
     if not w.alive(timeout=0.6):
-        st["state"] = "stopped"
+        # Before the task went out the tab may still install dependencies.
+        st["state"] = "starting" if not job.get("sent_at") and time.time() - job.get("created", 0) < 1800 \
+            else "stopped"
         return st
     sid = job.get("session")
     if not sid:
@@ -374,23 +474,25 @@ def job_status(job: Dict[str, Any], detail: bool = False) -> Dict[str, Any]:
         return st
     st["pending"] = w.pending(sid)
     busy = w.busy(sid)
+    todos = w.todos(sid)
+    st["todo_done"] = sum(1 for t in todos if t.get("status") == "completed")
+    st["todo_total"] = len(todos)
+    idle = not st["pending"] and not busy
+    if busy and not detail:
+        # Cheap: only the session header, for stall detection.
+        st["updated"] = ((w.get(f"/session/{sid}") or {}).get("time") or {}).get("updated")
+    if detail or idle:
+        summ = session_summary(w, sid, job["dir"])
+        st.update({"cost": summ["cost"], "model": summ["model"], "activity": summ["activity"],
+                   "updated": summ["updated"], "error": summ["error"]})
     if st["pending"]:
         st["state"] = "waiting"
     elif busy:
         st["state"] = "running"
     else:
-        st["state"] = "done"
-    todos = w.todos(sid)
-    st["todo_done"] = sum(1 for t in todos if t.get("status") == "completed")
-    st["todo_total"] = len(todos)
+        st["state"] = "failed" if st.get("error") else "done"
     if detail:
-        msgs = w.messages(sid)
-        st["activity"] = last_activity(msgs, job["dir"])
-        st.update({k: v for k, v in final_report(msgs).items() if k in ("cost", "model")})
         st["diff"] = diffstat(job["dir"])
-        times = [m.get("info", {}).get("time", {}) for m in msgs]
-        stamps = [t.get("completed") or t.get("created") for t in times if t]
-        st["last_ms"] = max([s for s in stamps if s] or [0])
     return st
 
 

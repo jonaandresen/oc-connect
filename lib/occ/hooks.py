@@ -4,6 +4,10 @@
 new session about jobs that are still open - otherwise it would work blind
 next to running workers.
 
+``pre_bash``: blocks ``git commit`` inside a job's worktree until Claude has
+recorded its review for exactly that state (``ops.review``). The review is the
+point of the whole design; this makes skipping it impossible by accident.
+
 ``prompt_submit``: when the user says "do this with OpenCode" (German or
 English), adds a note so Claude delegates instead of implementing. Pure regex,
 no network: it runs on every prompt.
@@ -103,6 +107,40 @@ def _emit(event: str, context: str) -> None:
     print(json.dumps({"hookSpecificOutput": {"hookEventName": event, "additionalContext": context}}))
 
 
+_COMMIT_RE = re.compile(r"\bgit\b(?:\s+-[cC]\s+\S+)*\s+commit\b")
+_CD_RE = re.compile(r"(?:^|[;&|]\s*)cd\s+(\"[^\"]+\"|'[^']+'|\S+)")
+_GIT_C_RE = re.compile(r"\bgit\s+-C\s+(\"[^\"]+\"|'[^']+'|\S+)")
+
+
+def commit_dirs(command: str, cwd: str) -> list:
+    """Directories a Bash command would commit in (empty: no commit)."""
+    if not _COMMIT_RE.search(command or ""):
+        return []
+    dirs = [m.strip("'\"") for m in _GIT_C_RE.findall(command) + _CD_RE.findall(command)]
+    dirs = [os.path.expanduser(d) if os.path.isabs(os.path.expanduser(d)) else os.path.join(cwd, d) for d in dirs]
+    return dirs or [cwd]
+
+
+def pre_bash() -> None:
+    try:
+        data = json.loads(sys.stdin.read() or "{}")
+    except ValueError:
+        return
+    command = (data.get("tool_input") or {}).get("command", "")
+    if "commit" not in command:
+        return
+    for d in commit_dirs(command, data.get("cwd") or os.getcwd()):
+        try:
+            reason = ops.review_block_reason(d)
+        except Exception:
+            reason = None
+        if reason:
+            print(json.dumps({"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                                                     "permissionDecision": "deny",
+                                                     "permissionDecisionReason": reason}}))
+            return
+
+
 def session_start() -> None:
     try:
         install_shim()
@@ -110,16 +148,19 @@ def session_start() -> None:
         rows = ops.status_all()
     except Exception:
         return
+    me = core.claude_pid()
     active = [r for r in rows if r["state"] != "stopped" or not r.get("pr")]
     if not active:
         return
     lines = []
     for st in active:
         extra = "; ".join(p["text"][:80] for p in st.get("pending", []))
+        other = " [owned by another live Claude session - leave it alone]" \
+            if st.get("owner_alive") and st.get("owner") != me else ""
         lines.append(f"- {st['slug']}: {st['state']} - {st['title']}" + (f" ({extra})" if extra else "")
-                     + (f" PR {st['pr']}" if st.get("pr") else ""))
+                     + (f" PR {st['pr']}" if st.get("pr") else "") + other)
     _emit("SessionStart", "Open OpenCode jobs (oc-connect):\n" + "\n".join(lines)
-          + "\nReview every finished job before committing it (skill oc:delegate, step 5).")
+          + "\nReview every finished job and record it with the oc-connect `review` tool before committing.")
 
 
 def prompt_submit() -> None:

@@ -60,13 +60,17 @@ If the user says "do this with OpenCode" (or similar), always delegate that task
 
 HOW: 1) Research first and write a precise task (files with lines, required behaviour, tests, what must
 not change, the project's check commands). The skill `oc:delegate` has the full template - load it
-before your first delegation in a session. 2) the `delegate` tool. 3) Optionally start the `oc:opencode-worker`
-agent in the background (description "oc <slug>") so the job appears in the Claude Code agent panel.
-4) The oc-connect monitor notifies you when a job asks something, finishes or dies - you do not need to poll.
-Answer worker questions yourself when code or task settle them (`answer`); forward product, legal
-or money questions to the user. 5) When done: `report`, then REVIEW - read the full diff, run all
-checks yourself, do a defeat test, look for untested cases. Send corrections with `send`.
-6) You commit and open the PR; then `set_pr` and `close`. After merge: `done`.
+before your first delegation in a session. 2) `delegate` - it returns once the tab is open; the worker
+starts in the background. 3) The oc-connect monitor notifies you: running, questions (with an id),
+finished, failed, stalled, over budget, stopped. Do not poll. Only jobs owned by THIS session are
+reported; leave jobs of other live Claude sessions alone unless the user says otherwise.
+4) Answer questions yourself when code or task settle them (`answer` with the question id). Product,
+legal or money questions go to the user - send a push notification if they may be away.
+5) When finished: `report`, then REVIEW yourself - read the full diff, run all checks, defeat test,
+hunt for untested cases. Corrections go back with `send`. 6) Record the review with `review` (checks
+run, defeat test, known gaps). A commit hook blocks commits in a job worktree until the review for
+exactly that state is recorded. 7) Commit, push, open the PR; then `set_pr` and `close`. After merge:
+`done` (it refuses while unpushed work exists).
 {agent_line}"""
 
 
@@ -107,16 +111,18 @@ TOOLS: Dict[str, Dict[str, Any]] = {
             "slug": _slug_schema(), "message": {"type": "string"}}},
     },
     "answer": {
-        "description": "Answer a worker's open question. One answer per sub-question, in order; "
-                       "use an option label or free text.",
-        "inputSchema": {"type": "object", "required": ["slug", "answers"], "properties": {
-            "slug": _slug_schema(), "answers": {"type": "array", "items": {"type": "string"}}}},
+        "description": "Answer a worker's open question. Pass the question id from the monitor or `status`; "
+                       "one answer per sub-question, in order; use an option label or free text.",
+        "inputSchema": {"type": "object", "required": ["slug", "question_id", "answers"], "properties": {
+            "slug": _slug_schema(), "question_id": {"type": "string"},
+            "answers": {"type": "array", "items": {"type": "string"}}}},
     },
     "permit": {
         "description": "Answer a worker's permission request: once, always or reject. Reject anything "
                        "the guard would forbid in spirit.",
         "inputSchema": {"type": "object", "required": ["slug", "reply"], "properties": {
-            "slug": _slug_schema(), "reply": {"type": "string", "enum": ["once", "always", "reject"]}}},
+            "slug": _slug_schema(), "reply": {"type": "string", "enum": ["once", "always", "reject"]},
+            "request_id": {"type": "string", "description": "id from the monitor or status"}}},
     },
     "open": {
         "description": "Open the job's terminal tab for the user (restarts a stopped worker, same session).",
@@ -128,9 +134,21 @@ TOOLS: Dict[str, Dict[str, Any]] = {
         "inputSchema": {"type": "object", "required": ["slug"], "properties": {"slug": _slug_schema()}},
     },
     "done": {
-        "description": "Stop the worker and remove the job's worktree (branch stays). Use after merge.",
-        "inputSchema": {"type": "object", "required": ["slug"], "properties": {"slug": _slug_schema()}},
+        "description": "Stop the worker and remove the job's worktree (branch stays). Use after merge. "
+                       "Refuses while uncommitted or unpushed work exists unless force is true.",
+        "inputSchema": {"type": "object", "required": ["slug"], "properties": {
+            "slug": _slug_schema(), "force": {"type": "boolean", "description": "discard unsaved work"}}},
         "annotations": {"destructiveHint": True},
+    },
+    "review": {
+        "description": "Record your review of a finished job before committing it: which checks you ran "
+                       "with what result, your defeat test, and the gaps you know of. Tied to the exact "
+                       "worktree state; a commit hook blocks commits until it is recorded.",
+        "inputSchema": {"type": "object", "required": ["slug", "checks", "defeat_test", "gaps"], "properties": {
+            "slug": _slug_schema(),
+            "checks": {"type": "string", "description": "commands run and their results"},
+            "defeat_test": {"type": "string", "description": "what you broke and which test turned red"},
+            "gaps": {"type": "string", "description": "what is not covered or not verified"}}},
     },
     "set_pr": {
         "description": "Record the pull request of a job so status views show it.",
@@ -153,6 +171,12 @@ def _status_text(_: Dict[str, Any]) -> str:
     rows = ops.status_all(detail=True)
     if not rows:
         return "no jobs"
+    me = core.claude_pid()
+    for r in rows:
+        owner = r.pop("owner", None)
+        r["owner"] = ("this session" if owner == me else
+                      "another live Claude session - leave it alone" if r.pop("owner_alive", False) else "nobody")
+        r.pop("owner_alive", None)
     return json.dumps(rows, indent=1, default=str)
 
 
@@ -163,17 +187,16 @@ def _setup_text(_: Dict[str, Any]) -> str:
 HANDLERS: Dict[str, Callable[[Dict[str, Any]], str]] = {
     "delegate": lambda a: ops.start(a["slug"], a["task"], title=a.get("title"), branch=a.get("branch"),
                                        agent=a.get("agent"), repo=a.get("repo"), base=a.get("base"),
-                                       cwd=_project_dir(), model=a.get("model"))
-                   + f"\n\nNext: optionally start agent `oc:opencode-worker` in the background with description "
-                     f"\"oc {a['slug']}\" for the agent panel. The monitor will notify you.",
+                                       cwd=_project_dir(), model=a.get("model"), background=True),
     "status": _status_text,
     "report": lambda a: ops.report(a["slug"]),
     "send": lambda a: ops.send(a["slug"], a["message"]),
-    "answer": lambda a: ops.answer(a["slug"], a["answers"]),
-    "permit": lambda a: ops.permit(a["slug"], a["reply"]),
+    "answer": lambda a: ops.answer(a["slug"], a["answers"], a.get("question_id")),
+    "permit": lambda a: ops.permit(a["slug"], a["reply"], a.get("request_id")),
     "open": lambda a: ops.open_(a["slug"]),
     "close": lambda a: ops.close(a["slug"]),
-    "done": lambda a: ops.done(a["slug"]),
+    "done": lambda a: ops.done(a["slug"], bool(a.get("force"))),
+    "review": lambda a: ops.review(a["slug"], a["checks"], a["defeat_test"], a["gaps"]),
     "set_pr": lambda a: ops.set_pr(a["slug"], a["pr"]),
     "setup": _setup_text,
 }

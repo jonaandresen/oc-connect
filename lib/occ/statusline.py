@@ -80,7 +80,7 @@ def row(st: Dict[str, Any], name_width: int = 17, title_width: int = 32) -> Opti
     """One status row, or None for jobs that need no attention."""
     head = f"{st['slug'][:name_width]:<{name_width}} {_short_title(st)[:title_width]:<{title_width}}"
     state = st["state"]
-    if state == "waiting":
+    if state == "waiting" and st.get("pending"):
         p = st["pending"][0]
         what = ("asks: " + p["text"]) if p["kind"] == "question" else f"permission: {p['text']}"
         return f"{C['ye']}? {C['r']}{C['b']}{head}{C['r']} {C['ye']}{what[:70]}{C['r']}"
@@ -88,6 +88,8 @@ def row(st: Dict[str, Any], name_width: int = 17, title_width: int = 32) -> Opti
         parts = [bar(st.get("todo_done", 0), st.get("todo_total", 0)), _diff(st),
                  f"{C['dim']}{st.get('agent') or ''}{C['r']}", _age(st)]
         return f"{C['cy']}▶ {C['r']}{C['b']}{head}{C['r']} " + "  ".join(p for p in parts if p)
+    if state == "failed":
+        return f"{C['red']}✗ {C['r']}{C['b']}{head}{C['r']} {C['red']}{str(st.get('error') or 'failed')[:70]}{C['r']}"
     if state == "done" and not st.get("pr"):
         return f"{C['gr']}✓ {C['r']}{C['b']}{head}{C['r']} {C['gr']}ready for review{C['r']}  {_diff(st)}"
     return None

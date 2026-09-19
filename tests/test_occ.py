@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.join(ROOT, "lib"))
 TMP_STATE = tempfile.mkdtemp(prefix="oc-test-state-")
 os.environ["OC_STATE"] = TMP_STATE
 
-from occ import core, hooks, mcp, ops, statusline  # noqa: E402
+from occ import core, hooks, mcp, monitor, ops, statusline  # noqa: E402
 
 
 class FakeOpenCode(BaseHTTPRequestHandler):
@@ -31,6 +31,9 @@ class FakeOpenCode(BaseHTTPRequestHandler):
     questions = []
     permissions = []
     todos = []
+    error = None
+    updated = 1000
+    replies = []
 
     def log_message(self, *args):
         pass
@@ -56,9 +59,17 @@ class FakeOpenCode(BaseHTTPRequestHandler):
         if path.endswith("/todo"):
             return self._send(FakeOpenCode.todos)
         if path.endswith("/message"):
-            return self._send([{"info": {"role": "assistant", "cost": 0.5, "modelID": "m"},
+            return self._send([{"info": {"role": "assistant", "cost": 0.5, "modelID": "m",
+                                         "error": FakeOpenCode.error},
                                 "parts": [{"type": "text", "text": "all done"}]}])
+        if path.startswith("/session/"):
+            return self._send({"id": path.split("/")[2], "time": {"updated": FakeOpenCode.updated}})
         self._send(None)
+
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        FakeOpenCode.replies.append((self.path.split("?")[0], json.loads(self.rfile.read(length) or b"null")))
+        self._send(True)
 
 
 def start_fake():
@@ -81,8 +92,10 @@ class StateMachine(unittest.TestCase):
 
     def setUp(self):
         FakeOpenCode.status, FakeOpenCode.questions, FakeOpenCode.permissions, FakeOpenCode.todos = {}, [], [], []
+        FakeOpenCode.error, FakeOpenCode.replies = None, []
+        FakeOpenCode.updated += 1  # fresh summary cache per test
         core.save_job({"slug": "t1", "title": "#1 Test job", "dir": self.dir, "port": self.srv.server_port,
-                       "session": "ses_1", "agent": "fixer", "created": time.time(), "sent_at": 0})
+                       "session": "ses_1", "agent": "fixer", "created": time.time(), "sent_at": time.time() - 3600})
 
     def tearDown(self):
         core.delete_job("t1")
@@ -121,6 +134,20 @@ class StateMachine(unittest.TestCase):
         FakeOpenCode.status = {"ses_1": {"type": "idle"}}
         self.assertEqual(ops.status("t1")["state"], "done")
 
+    def test_worker_not_up_before_task_sent_is_starting(self):
+        # The tab installs dependencies before OpenCode listens.
+        job = core.load_job("t1")
+        job.update(port=1, sent_at=None)
+        core.save_job(job)
+        self.assertEqual(ops.status("t1")["state"], "starting")
+
+    def test_idle_session_before_task_sent_is_not_finished(self):
+        # Between "tab is up" and "task sent" the session is idle - that is no finish.
+        job = core.load_job("t1")
+        job["sent_at"] = None
+        core.save_job(job)
+        self.assertEqual(ops.status("t1")["state"], "starting")
+
     def test_dead_worker_is_stopped(self):
         job = core.load_job("t1")
         job["port"] = 1  # nothing listens there
@@ -131,7 +158,7 @@ class StateMachine(unittest.TestCase):
         FakeOpenCode.permissions = [{"id": "p1", "sessionID": "ses_1", "permission": "bash", "patterns": ["rm -rf x"]}]
         code, text = ops.wait("t1", minutes=0.01, poll=0.01)
         self.assertEqual(code, 2)
-        self.assertIn("PERMISSION: bash rm -rf x", text)
+        self.assertIn("PERMISSION [p1]: bash rm -rf x", text)
 
     def test_wait_returns_report_when_done(self):
         code, text = ops.wait("t1", minutes=0.01, poll=0.01)
@@ -143,6 +170,202 @@ class StateMachine(unittest.TestCase):
         core.save_job({"slug": "gone", "dir": "/nonexistent/oc-test", "port": 1})
         self.assertNotIn("gone", [j["slug"] for j in core.load_jobs()])
         self.assertFalse(os.path.exists(core.job_path("gone")))
+
+    def test_error_in_last_turn_is_failed_not_done(self):
+        FakeOpenCode.error = {"name": "APIError", "data": {"message": "rate limited"}}
+        st = ops.status("t1")
+        self.assertEqual(st["state"], "failed")
+        self.assertIn("rate limited", st["error"])
+        code, text = ops.wait("t1", minutes=0.01, poll=0.01)
+        self.assertEqual(code, 1)
+
+    def test_start_error_is_failed(self):
+        job = core.load_job("t1")
+        job["start_error"] = "OpenCode has no agent 'fixr'"
+        core.save_job(job)
+        st = ops.status("t1")
+        self.assertEqual((st["state"], st["error"]), ("failed", "OpenCode has no agent 'fixr'"))
+
+    def _question(self, qid="q1", parts=1):
+        FakeOpenCode.status = {"ses_1": {"type": "busy"}}
+        FakeOpenCode.questions = [{"id": qid, "sessionID": "ses_1",
+                                   "questions": [{"question": f"Q{i}", "options": []} for i in range(parts)]}]
+
+    def test_answer_goes_to_the_named_question(self):
+        self._question("q7")
+        ops.answer("t1", ["yes"], "q7")
+        self.assertEqual(FakeOpenCode.replies[-1], ("/question/q7/reply", {"answers": [["yes"]]}))
+        self.assertIn("q7", core.load_job("t1")["answered"])
+
+    def test_answer_to_a_question_that_is_gone_is_refused(self):
+        # A second Claude session must not answer the NEXT question by accident.
+        self._question("q8")
+        with self.assertRaises(core.OcError) as ctx:
+            ops.answer("t1", ["yes"], "q7")
+        self.assertIn("no longer open", str(ctx.exception))
+        self.assertEqual(FakeOpenCode.replies, [])
+
+    def test_answer_count_must_match_sub_questions(self):
+        self._question("q9", parts=2)
+        with self.assertRaises(core.OcError):
+            ops.answer("t1", ["only one"], "q9")
+
+
+class MonitorTransitions(unittest.TestCase):
+    job = {"slug": "m1", "port": 1, "dir": "/tmp"}
+
+    def st(self, state, **kw):
+        base = {"slug": "m1", "title": "t", "state": state, "pending": [], "agent": "fixer"}
+        base.update(kw)
+        return base
+
+    def run_seq(self, states, job=None, first=True):
+        w, lines = monitor.JobWatch(), []
+        for i, st in enumerate(states):
+            with mock.patch.object(core, "diffstat", return_value={"files": 1, "plus": 2, "minus": 0}):
+                lines.append(monitor.transition(w, st, job or self.job, first=first and i == 0))
+        return lines
+
+    def test_silent_start_then_finish(self):
+        out = self.run_seq([self.st("running"), self.st("running"), self.st("done")])
+        self.assertEqual(out[0], [])
+        self.assertEqual(out[1], [])
+        self.assertIn("finished", out[2][0])
+
+    def test_waiting_job_is_reported_even_at_start(self):
+        q = [{"kind": "question", "id": "q1", "text": "Which?", "options": ["a"]}]
+        out = self.run_seq([self.st("waiting", pending=q)])
+        self.assertIn("asks [q1]: Which?", out[0][0])
+
+    def test_new_question_while_waiting_is_reported(self):
+        q1 = [{"kind": "question", "id": "q1", "text": "A?", "options": []}]
+        q2 = [{"kind": "question", "id": "q2", "text": "B?", "options": []}]
+        out = self.run_seq([self.st("running"), self.st("waiting", pending=q1), self.st("waiting", pending=q1),
+                            self.st("waiting", pending=q2)])
+        self.assertEqual([len(x) for x in out], [0, 1, 0, 1])
+
+    def test_answer_outside_claude_is_reported(self):
+        q = [{"kind": "question", "id": "q1", "text": "A?", "options": []}]
+        out = self.run_seq([self.st("running"), self.st("waiting", pending=q), self.st("running")],
+                           job=dict(self.job, answered=[]))
+        self.assertIn("answered directly in OpenCode", out[2][0])
+        out = self.run_seq([self.st("running"), self.st("waiting", pending=q), self.st("running")],
+                           job=dict(self.job, answered=["q1"]))
+        self.assertEqual(out[2], [])
+
+    def test_failed_and_stalled_and_budget(self):
+        out = self.run_seq([self.st("running"), self.st("failed", error="APIError: down")])
+        self.assertIn("FAILED: APIError: down", out[1][0])
+        old = (time.time() - 3600) * 1000
+        out = self.run_seq([self.st("running"), self.st("running", updated=old), self.st("running", updated=old)])
+        self.assertIn("stalled", out[1][0])
+        self.assertEqual(out[2], [])  # reported once
+        out = self.run_seq([self.st("running", cost=0.5), self.st("running", cost=2.5),
+                            self.st("running", cost=3.0), self.st("running", cost=4.1)])
+        self.assertEqual([len(x) for x in out], [0, 1, 0, 1])
+
+    def test_watcher_suppresses_duplicate_finish(self):
+        job = dict(self.job, watcher=os.getpid())
+        out = self.run_seq([self.st("running"), self.st("done")], job=job)
+        self.assertEqual(out[1], [])
+        job = dict(self.job, watcher_until=time.time() + 60)
+        self.assertEqual(self.run_seq([self.st("running"), self.st("done")], job=job)[1], [])
+
+    def test_start_reported_with_browser_link(self):
+        out = self.run_seq([self.st("starting"), self.st("running")], first=False)
+        self.assertIn("is running", out[1][0])
+
+
+def _git_repo_with_origin():
+    tmp = tempfile.mkdtemp()
+    origin, repo = os.path.join(tmp, "origin.git"), os.path.join(tmp, "repo")
+    subprocess.run(["git", "init", "-q", "--bare", origin], check=True)
+    subprocess.run(["git", "clone", "-q", origin, repo], check=True, capture_output=True)
+    with open(os.path.join(repo, "a.txt"), "w") as fh:
+        fh.write("a\n")
+    for args in (["add", "."], ["-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "init"],
+                 ["push", "-q", "origin", "HEAD:main"]):
+        subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+    return origin, repo
+
+
+class GuardEnvironment(unittest.TestCase):
+    """The second guard layer, against real git - no model involved."""
+
+    def test_every_push_form_is_blocked_and_fetch_works(self):
+        origin, repo = _git_repo_with_origin()
+        env = dict(os.environ, **ops.worker_env())
+        for cmd in (["git", "push", "origin", "HEAD:refs/heads/x1"],
+                    ["bash", "-c", "git push origin HEAD:refs/heads/x2"],
+                    ["git", "push", origin, "HEAD:refs/heads/x3"],
+                    ["git", "push", "file://" + origin, "HEAD:refs/heads/x4"]):
+            res = subprocess.run(cmd, cwd=repo, env=env, capture_output=True, text=True)
+            self.assertNotEqual(res.returncode, 0, cmd)
+        self.assertEqual(subprocess.run(["git", "fetch", "origin"], cwd=repo, env=env).returncode, 0)
+        branches = subprocess.run(["git", "branch"], cwd=origin, capture_output=True, text=True).stdout
+        self.assertNotIn("x", branches.replace("main", ""))
+
+    def test_user_git_config_entries_are_kept(self):
+        with mock.patch.dict(os.environ, {"GIT_CONFIG_COUNT": "1"}):
+            env = ops.worker_env()
+        self.assertEqual(env["GIT_CONFIG_COUNT"], "3")
+        self.assertEqual(env["GIT_CONFIG_KEY_1"], "remote.origin.pushurl")
+
+
+class ReviewGate(unittest.TestCase):
+    def setUp(self):
+        self.origin, self.repo = _git_repo_with_origin()
+        core.save_job({"slug": "rv", "dir": self.repo, "port": 1, "created": time.time()})
+
+    def tearDown(self):
+        core.delete_job("rv")
+
+    def test_commit_blocked_until_review_then_again_after_change(self):
+        with open(os.path.join(self.repo, "a.txt"), "w") as fh:
+            fh.write("changed\n")
+        self.assertIn("has not been reviewed", ops.review_block_reason(self.repo))
+        with self.assertRaises(core.OcError):
+            ops.review("rv", "ok", "ok", "ok")  # too thin to count
+        ops.review("rv", "unit tests 21/21 green", "broke parser, test_x went red", "no e2e run")
+        self.assertIsNone(ops.review_block_reason(self.repo))
+        subprocess.run(["git", "add", "-A"], cwd=self.repo, check=True)  # staging does not matter
+        self.assertIsNone(ops.review_block_reason(self.repo))
+        with open(os.path.join(self.repo, "b.txt"), "w") as fh:
+            fh.write("new after review\n")
+        self.assertIn("changed after the recorded review", ops.review_block_reason(self.repo))
+
+    def test_other_repositories_are_not_affected(self):
+        _, other = _git_repo_with_origin()
+        self.assertIsNone(ops.review_block_reason(other))
+
+    def test_commit_dirs_parsing(self):
+        self.assertEqual(hooks.commit_dirs("npm test", "/w"), [])
+        self.assertEqual(hooks.commit_dirs('git commit -m "x"', "/w"), ["/w"])
+        self.assertEqual(hooks.commit_dirs("cd /a/b && git add -A && git commit -m x", "/w"), ["/a/b"])
+        self.assertEqual(hooks.commit_dirs("git -C /a/c commit -m x", "/w"), ["/a/c"])
+        self.assertEqual(hooks.commit_dirs("cd sub && git commit -m x", "/w"), ["/w/sub"])
+        self.assertEqual(hooks.commit_dirs("git -c user.name=x commit -m y", "/w"), ["/w"])
+
+    def test_hook_denies_with_reason(self):
+        with open(os.path.join(self.repo, "a.txt"), "w") as fh:
+            fh.write("changed\n")
+        out = io.StringIO()
+        data = {"tool_input": {"command": f"cd {self.repo} && git commit -am x"}, "cwd": "/"}
+        with mock.patch.object(sys, "stdin", io.StringIO(json.dumps(data))), mock.patch.object(sys, "stdout", out):
+            hooks.pre_bash()
+        decision = json.loads(out.getvalue())["hookSpecificOutput"]
+        self.assertEqual(decision["permissionDecision"], "deny")
+
+
+class DoneSafety(unittest.TestCase):
+    def test_refuses_with_unsaved_work(self):
+        origin, repo = _git_repo_with_origin()
+        self.assertEqual(ops.unsaved_work(repo), [])
+        with open(os.path.join(repo, "a.txt"), "w") as fh:
+            fh.write("dirty\n")
+        self.assertIn("uncommitted", ops.unsaved_work(repo)[0])
+        subprocess.run(["git", "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qam", "x"], cwd=repo, check=True)
+        self.assertIn("not pushed", ops.unsaved_work(repo)[0])
 
 
 class DelegationPhrases(unittest.TestCase):

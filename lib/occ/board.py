@@ -17,7 +17,7 @@ import tty
 from . import core, ops, terminal
 from .statusline import C, bar
 
-ICON = {"running": ("▶", C["cy"]), "waiting": ("?", C["ye"]), "done": ("✓", C["gr"]),
+ICON = {"running": ("▶", C["cy"]), "waiting": ("?", C["ye"]), "done": ("✓", C["gr"]), "failed": ("✗", C["red"]),
         "stopped": ("■", C["dim"]), "starting": ("…", C["cy"])}
 
 
@@ -39,6 +39,8 @@ def draw() -> list:
             out.append(f"      {details}")
         for p in st.get("pending", []):
             out.append(f"      {C['ye']}{p['kind']}: {p['text'][:90]}{C['r']}")
+        if st["state"] == "failed" and st.get("error"):
+            out.append(f"      {C['red']}{st['error'][:100]}{C['r']}")
         if st.get("activity") and st["state"] == "running":
             out.append(f"      {C['dim']}{st['activity']}{C['r']}")
     if not rows:

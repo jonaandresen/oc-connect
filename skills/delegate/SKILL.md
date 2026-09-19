@@ -6,16 +6,16 @@ argument-hint: "<#issue | task description>"
 
 # Delegate to OpenCode
 
-Claude is the **lead**, the OpenCode worker is the **builder**. Claude researches and writes the task, the worker implements, the human can watch live, Claude reviews and commits. The worker never commits, pushes or deploys: the guard config blocks it technically (`oc selftest` proves it).
+Claude is the **lead**, the OpenCode worker is the **builder**. Claude researches and writes the task, the worker implements, the human can watch live, Claude reviews and commits. The worker is kept from committing, pushing and running docker by two layers - the OpenCode permission guard and git/docker settings in its environment (`oc selftest` proves both). That is protection against accidents, not a sandbox.
 
-Tools: the oc-connect MCP tools (`delegate`, `status`, `report`, `send`, `answer`, `permit`, `open`, `close`, `done`, `set_pr`, `setup`). CLI with the same functions: `oc` (`oc --help`).
+Tools: the oc-connect MCP tools (`delegate`, `status`, `report`, `send`, `answer`, `permit`, `review`, `open`, `close`, `done`, `set_pr`, `setup`). CLI with the same functions: `oc` (`oc --help`).
 
 Task for this invocation: $ARGUMENTS
 
 ## Before the first job in a repository
 
 1. `setup` tool: what OpenCode offers here - agents and their models, plugins. Write the task for THIS setup.
-2. Once per machine: `oc selftest` (Bash) proves that `git push` and `docker` are rejected. The result is judged by the status of the tool calls, not by the model's text.
+2. Once per machine: `oc selftest` (Bash) proves that direct and indirect `git push` and `docker` are blocked. It runs in a throw-away repository and is judged by outcome - nothing may reach its remote - not by what the model writes.
 3. Read the project rules (`CLAUDE.md`, `AGENTS.md`, contributor docs): critical paths, shared test resources, check commands.
 
 ## Should this be delegated?
@@ -42,21 +42,23 @@ Measured in practice: a fully planned task leaves the `orchestrator` nothing to 
 
 1. **Research:** read the issue, find the code, settle what must come out. The task names files with line numbers and evidence.
 2. **Write the task** using the template below.
-3. **Start:** `delegate` with `slug` (issue number or short name), `title` (starting with the issue number), `task`, and `agent`. This creates the worktree from the remote's default branch, copies git-ignored `.env` files, installs dependencies from lockfiles, opens a new terminal tab with the worker and sends the task. Give the human the browser link from the result.
-4. **Panel (recommended):** start the agent `oc:opencode-worker` in the background with the description `oc <slug>` and the prompt `slug: <slug>`. The job then shows in the Claude Code agent panel with progress, diff size and state.
-5. **Wait:** do nothing. The oc-connect monitor tells you when the job asks something, finishes or its worker stops. Without a monitor (non-interactive sessions): `oc wait <slug>` in Bash with `run_in_background`.
-6. **Questions come to Claude first:**
-   - Answer yourself when the task, the code, the project rules or the issue settle it, or when it is purely technical: `answer` with a short reason. Permission requests: `permit` with `once` or `reject` (reject anything the guard forbids in spirit).
-   - Forward to the human when it is a product, legal or money decision or the evidence conflicts: ask with your recommendation first, then pass the answer on with `answer`.
-   - Never guess just to keep the worker going. The human sees questions in Vibe Island too, but answers there only when you forwarded the question - otherwise two answers collide.
+3. **Start:** `delegate` with `slug` (issue number or short name), `title` (starting with the issue number), `task`, and `agent`. It creates the worktree from the remote's default branch (local unpushed commits are not in it), copies git-ignored `.env` files and returns. In the background the session is created, a new terminal tab opens directly in that session, installs dependencies from lockfiles, starts the worker and gets the task.
+4. **Wait:** do nothing. The oc-connect monitor tells you when the job runs (with the browser link for the human), asks something, finishes, fails, stalls, gets expensive or its worker stops. Only jobs owned by this session are reported; leave jobs of other live Claude sessions alone. Without a monitor (non-interactive sessions): `oc wait <slug>` in Bash with `run_in_background`.
+   Optional, if the user wants the job in the agent panel: start `oc:opencode-worker` in the background with the description `oc <slug>` and the prompt `slug: <slug>`. It only waits (Haiku); the monitor then skips the duplicate finish message.
+5. **Questions come to Claude first:** the monitor gives the question id.
+   - Answer yourself when the task, the code, the project rules or the issue settle it, or when it is purely technical: `answer` with that `question_id`. Permission requests: `permit` with `once` or `reject` (reject anything the guard forbids in spirit).
+   - Forward to the human when it is a product, legal or money decision or the evidence conflicts: ask with your recommendation first, and send a push notification if they may be away. Then pass the answer on with `answer`.
+   - Never guess just to keep the worker going. If the monitor says the question was answered directly in OpenCode, read the session before assuming what was decided.
+6. **Failed, stalled, expensive:** `report` shows the error. A provider error or rate limit usually just needs `send` "continue". A stall or a cost warning often means the worker goes in circles - look at the tab, then correct or stop.
 7. **Review (mandatory, never delegated):**
    - `report`, then read the FULL diff in the worktree, not just the worker's summary.
    - Run all of the project's check commands yourself, including the ones the task did not name (type checks!).
    - Your own defeat test at the core change: break the fix, see the test fail.
    - Hunt for what is NOT tested: is behaviour unchanged for all other cases? Compare a changed helper old (`git show <base>:<file>`) against new over many inputs. Look at real data for affected constellations. Run tests under other conditions (another `TZ`). Check that comments and docs are true, not only present.
 8. **Corrections:** `send` into the same session - finding with evidence, what to do, ask for a defeat test. Small things (a comment, one line) are faster to fix yourself.
-9. **Finish:** commit following the project's conventions, push, open the PR with test instructions and honestly marked gaps. Never commit the worker's `opencode.json`. Then `set_pr` and `close` - you decide when a session ends: once the PR exists and no correction is pending, close it without asking. Idle workers cost nothing but clutter the status line, Vibe Island and the tab bar.
-10. **After merge:** `done` removes the worktree (the branch stays).
+9. **Record the review:** `review` with `checks` (commands and results), `defeat_test` (what you broke, which test turned red) and `gaps` (what is not covered). A commit hook blocks `git commit` in a job worktree until the review for exactly the current state is recorded; any later edit needs a new `review`.
+10. **Finish:** commit following the project's conventions, push, open the PR with test instructions and honestly marked gaps. Never commit the worker's `opencode.json`. Then `set_pr` and `close` - you decide when a session ends: once the PR exists and no correction is pending, close it without asking.
+11. **After merge:** `done` removes the worktree (the branch stays). It refuses while uncommitted or unpushed work exists; `force` only when the user wants the work discarded.
 
 ## Task template
 

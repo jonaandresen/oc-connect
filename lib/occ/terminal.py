@@ -57,6 +57,56 @@ tell application "Terminal"
 end tell''')
 
 
+def _terminal_app_tab(command: str) -> str:
+    """New tab in Terminal.app, falling back to a new window. Returns tab/window/"".
+
+    Two facts, both measured, shape this:
+
+    * Terminal's tabs are native macOS window tabs, so AppleScript lists EVERY
+      TAB AS ITS OWN WINDOW with one tab. A new tab shows up as a new window id.
+    * Opening the tab can fail silently (keystroke dropped, other app in
+      front). The old code then wrote into "the selected tab of the front
+      window" - an EXISTING tab; once that was the tab running Claude Code, and
+      the worker command landed in Claude's prompt.
+
+    So: remember all window ids, open a tab via the Shell menu (menu 3, item 2,
+    first profile - by position, so it works in every UI language), and write
+    only into a window id that did not exist before and runs nothing.
+    Otherwise ``do script`` without a target, which always creates a window.
+    """
+    cmd = _as_string(command)
+    if not shutil.which("osascript"):
+        return ""
+    out = subprocess.run(["osascript", "-"], capture_output=True, text=True, timeout=30, input=f'''
+tell application "Terminal"
+  activate
+  set known to id of every window
+end tell
+try
+  tell application "System Events" to tell process "Terminal"
+    set frontmost to true
+    click menu item 1 of menu 1 of menu item 2 of menu 3 of menu bar 1
+  end tell
+end try
+repeat 20 times
+  delay 0.1
+  tell application "Terminal"
+    repeat with w in windows
+      if known does not contain (id of w) then
+        set t to selected tab of w
+        if not (busy of t) then
+          do script {cmd} in t
+          return "tab"
+        end if
+      end if
+    end repeat
+  end tell
+end repeat
+tell application "Terminal" to do script {cmd}
+return "window"''')
+    return out.stdout.strip() if out.returncode == 0 else ""
+
+
 def open_tab(title: str, command: str, cwd: Optional[str] = None) -> str:
     """Run ``command`` in a new tab of the terminal Claude Code runs in.
 
@@ -91,16 +141,10 @@ tell application "iTerm2"
 end tell'''):
             return f"iTerm tab: {title}"
     if term in ("Apple_Terminal", ""):
-        # Terminal.app has no scripting verb for tabs; Cmd-T via System Events
-        # needs the Accessibility permission for Terminal.
-        if _osascript(f'''
-tell application "Terminal" to activate
-delay 0.3
-tell application "System Events" to keystroke "t" using command down
-delay 0.6
-tell application "Terminal" to do script {_as_string(full)} in selected tab of front window'''):
+        res = _terminal_app_tab(full)
+        if res == "tab":
             return f"Terminal tab: {title}"
-        if _osascript(f'tell application "Terminal" to do script {_as_string(full)}'):
-            return (f"Terminal WINDOW: {title} (tabs need System Settings > Privacy & Security > "
-                    "Accessibility > Terminal)")
+        if res == "window":
+            return (f"Terminal WINDOW: {title} (a new tab could not be verified; tabs need System Settings > "
+                    "Privacy & Security > Accessibility > Terminal)")
     return f"no terminal opened; run it yourself:\n  {full}"

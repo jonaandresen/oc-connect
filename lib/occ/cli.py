@@ -12,7 +12,7 @@ import sys
 from . import core, ops
 from .core import OcError
 
-STATE_ICON = {"running": "▶", "waiting": "?", "done": "✓", "stopped": "■", "starting": "…"}
+STATE_ICON = {"running": "▶", "waiting": "?", "done": "✓", "failed": "✗", "stopped": "■", "starting": "…"}
 
 
 def _read_task(arg: str) -> str:
@@ -42,7 +42,9 @@ def cmd_status(args: argparse.Namespace) -> int:
             if d.get("files"):
                 print(f"    diff: {d['files']} files +{d['plus']} -{d['minus']}   cost ${st.get('cost', 0):.2f}")
         for p in st.get("pending", []):
-            print(f"    {p['kind'].upper()}: {p['text'][:100]}")
+            print(f"    {p['kind'].upper()} [{p['id']}]: {p['text'][:100]}")
+        if st.get("error") and st["state"] == "failed":
+            print(f"    ERROR: {st['error']}")
     return 0
 
 
@@ -82,9 +84,11 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("slug")
     s.add_argument("file", help="file with the message, or - for stdin")
 
-    s = sub.add_parser("wait", help="block until done / waiting / stopped (exit 0/2/3, 4 = still running)")
+    s = sub.add_parser("wait", help="block until done/failed/waiting/stopped (exit 0/1/2/3, 4 = still running)")
     s.add_argument("slug")
     s.add_argument("minutes", nargs="?", type=float, default=9.5)
+    s.add_argument("--through-questions", action="store_true",
+                   help="keep waiting while the job asks (the monitor reports questions)")
 
     s = sub.add_parser("status", help="all jobs")
     s.add_argument("--json", action="store_true")
@@ -96,15 +100,23 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("answer", help="answer an open question (one answer per sub-question)")
     s.add_argument("slug")
     s.add_argument("answers", nargs="+")
+    s.add_argument("--id", dest="question_id", help="question id from status/monitor")
 
     s = sub.add_parser("permit", help="answer an open permission request")
     s.add_argument("slug")
     s.add_argument("reply", choices=["once", "always", "reject"])
 
     for name, hlp in (("open", "open the job's tab (restarts the worker if needed)"),
-                      ("close", "stop the worker; its tab closes"),
-                      ("done", "stop the worker and remove the worktree (branch stays)")):
+                      ("close", "stop the worker; its tab closes")):
         sub.add_parser(name, help=hlp).add_argument("slug")
+    s = sub.add_parser("done", help="stop the worker and remove the worktree (branch stays)")
+    s.add_argument("slug")
+    s.add_argument("--force", action="store_true", help="also when uncommitted or unpushed work exists")
+    s = sub.add_parser("review", help="record the review of a job (unblocks commits of exactly this state)")
+    s.add_argument("slug")
+    s.add_argument("--checks", required=True)
+    s.add_argument("--defeat-test", required=True)
+    s.add_argument("--gaps", required=True)
 
     s = sub.add_parser("pr", help="remember the PR of a job (shown in status and board)")
     s.add_argument("slug")
@@ -124,7 +136,7 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("install-statusline", help="add job rows under your existing Claude Code status line")
     s.add_argument("--dry-run", action="store_true")
     s = sub.add_parser("hook", help="Claude Code hook entry point")
-    s.add_argument("event", choices=["session-start", "prompt-submit"])
+    s.add_argument("event", choices=["session-start", "prompt-submit", "pre-bash"])
     return p
 
 
@@ -137,7 +149,7 @@ def main(argv=None) -> int:
         elif args.cmd == "send":
             print(ops.send(args.slug, _read_task(args.file)))
         elif args.cmd == "wait":
-            code, text = ops.wait(args.slug, args.minutes)
+            code, text = ops.wait(args.slug, args.minutes, through_questions=args.through_questions)
             print(text)
             return code
         elif args.cmd == "status":
@@ -145,7 +157,7 @@ def main(argv=None) -> int:
         elif args.cmd == "report":
             print(ops.report(args.slug))
         elif args.cmd == "answer":
-            print(ops.answer(args.slug, args.answers))
+            print(ops.answer(args.slug, args.answers, args.question_id))
         elif args.cmd == "permit":
             print(ops.permit(args.slug, args.reply))
         elif args.cmd == "open":
@@ -153,7 +165,9 @@ def main(argv=None) -> int:
         elif args.cmd == "close":
             print(ops.close(args.slug))
         elif args.cmd == "done":
-            print(ops.done(args.slug))
+            print(ops.done(args.slug, args.force))
+        elif args.cmd == "review":
+            print(ops.review(args.slug, args.checks, args.defeat_test, args.gaps))
         elif args.cmd == "pr":
             print(ops.set_pr(args.slug, args.pr))
         elif args.cmd == "setup":
@@ -183,7 +197,8 @@ def main(argv=None) -> int:
             print(hooks.install_statusline(args.dry_run))
         elif args.cmd == "hook":
             from . import hooks
-            (hooks.session_start if args.event == "session-start" else hooks.prompt_submit)()
+            {"session-start": hooks.session_start, "prompt-submit": hooks.prompt_submit,
+             "pre-bash": hooks.pre_bash}[args.event]()
     except OcError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1
