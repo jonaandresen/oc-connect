@@ -361,6 +361,63 @@ class DoneSafety(unittest.TestCase):
         self.assertIn("not pushed", ops.unsaved_work(repo)[0])
 
 
+class Snapshots(unittest.TestCase):
+    """The worker's result must survive a mistake during the review."""
+
+    def setUp(self):
+        _, self.repo = _git_repo_with_origin()
+        self.wt = os.path.join(core.worktree_root(self.repo), "snap")
+        subprocess.run(["git", "worktree", "add", "-q", "-b", "oc/snap", self.wt], cwd=self.repo,
+                       check=True, capture_output=True)
+        core.save_job({"slug": "snap", "dir": self.wt, "repo": self.repo, "port": 1,
+                       "created": time.time()})
+
+    def tearDown(self):
+        core.delete_job("snap")
+
+    def _write(self, name, text):
+        with open(os.path.join(self.wt, name), "w") as fh:
+            fh.write(text)
+
+    def test_restore_brings_back_a_wiped_result(self):
+        self._write("a.txt", "worker result\n")       # tracked file changed
+        self._write("new.py", "print('new')\n")       # untracked file added
+        first = ops.snapshot("snap", "worker result")
+        self.assertTrue(first)
+        subprocess.run(["git", "checkout", "--", "a.txt"], cwd=self.wt, check=True)
+        os.remove(os.path.join(self.wt, "new.py"))
+        ops.restore("snap")
+        with open(os.path.join(self.wt, "a.txt")) as fh:
+            self.assertEqual(fh.read(), "worker result\n")
+        self.assertTrue(os.path.exists(os.path.join(self.wt, "new.py")))
+
+    def test_state_before_a_restore_is_kept_and_review_is_dropped(self):
+        self._write("a.txt", "first\n")
+        ops.snapshot("snap")
+        self._write("a.txt", "second\n")
+        ops.review("snap", "unit tests green 12/12", "broke the guard, test_x went red", "no e2e run yet")
+        self.assertIsNotNone(core.load_job("snap").get("review"))
+        ops.restore("snap", ops.snapshot_ref("snap") + "~1")
+        with open(os.path.join(self.wt, "a.txt")) as fh:
+            self.assertEqual(fh.read(), "first\n")
+        self.assertIsNone(core.load_job("snap").get("review"))
+        self.assertIn("second", subprocess.run(["git", "show", ops.snapshot_ref("snap") + ":a.txt"],
+                                               cwd=self.repo, capture_output=True, text=True).stdout)
+
+    def test_unchanged_content_makes_no_second_snapshot(self):
+        self._write("a.txt", "once\n")
+        first = ops.snapshot("snap")
+        self.assertEqual(ops.snapshot("snap"), first)
+
+    def test_snapshot_survives_done(self):
+        self._write("a.txt", "result to keep\n")
+        out = ops.done("snap", force=True)
+        self.assertIn(ops.snapshot_ref("snap"), out)
+        self.assertIn("result to keep", subprocess.run(
+            ["git", "show", ops.snapshot_ref("snap") + ":a.txt"], cwd=self.repo,
+            capture_output=True, text=True).stdout)
+
+
 class DelegationPhrases(unittest.TestCase):
     def test_requests_are_detected(self):
         for text in ("das machst du jz mit opencode", "gib das an OpenCode", "lass opencode das machen",
@@ -420,6 +477,11 @@ class StatusRows(unittest.TestCase):
             {"kind": "question", "text": "Refunds too?", "options": []}])))
         self.assertIn("asks: Refunds too?", row)
 
+    def test_long_names_are_marked_as_cut(self):
+        row = self.plain(statusline.row(self.st(slug="pricing-validation-extra", title="x")))
+        self.assertIn("pricing-validati…", row)
+        self.assertNotIn("pricing-validation ", row)  # a cut name must not read like the real one
+
     def test_done_row_until_pr_exists(self):
         self.assertIn("ready for review", self.plain(statusline.row(self.st(state="done"))))
         self.assertIsNone(statusline.row(self.st(state="done", pr="#303")))
@@ -439,6 +501,24 @@ class McpProtocol(unittest.TestCase):
         res = mcp.handle({"id": 3, "method": "tools/call", "params": {"name": "report", "arguments": {"slug": "nope"}}})
         self.assertTrue(res["isError"])
         self.assertIn("unknown job", res["content"][0]["text"])
+
+    def test_status_is_compact_text_with_everything_needed(self):
+        text = mcp._job_lines({"slug": "276", "state": "waiting", "agent": "oc-fast", "title": "#276 Orders",
+                               "dir": "/w/276", "branch": "oc/276", "todo_done": 2, "todo_total": 5,
+                               "diff": {"files": 3, "plus": 40, "minus": 2}, "cost": 0.12,
+                               "created": time.time() - 300, "owner": 42, "reviewed": False,
+                               "pending": [{"kind": "question", "id": "que_1", "text": "Which mode?",
+                                            "options": ["a", "b"]}]}, 42)
+        for needed in ("276 [waiting]", "oc-fast", "/w/276", "oc/276", "2/5 todos", "3 files +40 -2",
+                       "$0.12", "QUESTION [que_1]: Which mode?", "[options: a | b]"):
+            self.assertIn(needed, text)
+        self.assertNotIn("{", text)          # JSON would cost several times the tokens
+        self.assertLessEqual(len(text), 260)
+
+    def test_job_of_another_session_is_marked(self):
+        text = mcp._job_lines({"slug": "x", "state": "running", "dir": "/w/x", "branch": "b",
+                               "owner": 7, "owner_alive": True, "pending": []}, 42)
+        self.assertIn("ANOTHER LIVE CLAUDE SESSION", text)
 
     def test_unknown_method(self):
         with self.assertRaises(LookupError):

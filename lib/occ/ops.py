@@ -286,6 +286,7 @@ def send(slug: str, text: str) -> str:
     w = core.worker_of(job)
     if not w.alive():
         raise OcError(f"worker {slug} is not running - open it first (`open`)")
+    snapshot(slug, f"oc snapshot {slug}: before a follow-up message")  # a correction can make it worse
     w.prompt(job["session"], text, job.get("agent"), job.get("model"))
     job["sent_at"] = time.time()
     job.pop("review", None)  # new work, new review
@@ -337,6 +338,10 @@ def report(slug: str) -> str:
     lines.append(core.git("status", "--short", cwd=job["dir"], check=False) or "(clean)")
     d = core.diffstat(job["dir"])
     lines.append(f"{d['files']} files, +{d['plus']} -{d['minus']}")
+    snap = snapshot(slug, f"oc snapshot {slug}: worker result")
+    if snap:
+        lines.append(f"snapshot {snap[:9]} in {snapshot_ref(slug)} - `restore` puts this state back if the "
+                     "review damages it")
     lines.append("Next: read the full diff, run all checks, defeat test - then record it with `review`.")
     return "\n".join(lines)
 
@@ -465,6 +470,7 @@ def review(slug: str, checks: str, defeat_test: str, gaps: str) -> str:
     job["review"] = {"checks": checks, "defeat_test": defeat_test, "gaps": gaps, "at": time.time(),
                      "fingerprint": fingerprint(job["dir"])}
     core.save_job(job)
+    snapshot(slug, f"oc snapshot {slug}: reviewed state")
     return f"review of {slug} recorded - commits of exactly this state are allowed now"
 
 
@@ -485,6 +491,96 @@ def review_block_reason(path: str) -> Optional[str]:
         return (f"oc-connect: the worktree of job {job['slug']} changed after the recorded review. "
                 "Check the new changes and record the review again with `review`.")
     return None
+
+
+# --------------------------------------------------------------------------- snapshots
+
+def snapshot_ref(slug: str) -> str:
+    return f"refs/oc/{slug}"
+
+
+def snapshot(slug: str, label: str = "") -> Optional[str]:
+    """Record the worktree's exact content as a commit under ``refs/oc/<slug>``.
+
+    A worker's result lives in the worktree, uncommitted (workers may not
+    commit). Anything that touches those files during review - a ``git
+    checkout --``, a failed patch, a correction round that makes it worse -
+    would destroy work nobody can reproduce. So every step that reads or
+    changes a finished result takes a snapshot first.
+
+    The chain starts at the job's base commit, so ``git show <ref>`` is the
+    worker's diff. Nothing is checked out and the worktree is never touched;
+    unchanged content creates no new snapshot. Returns the commit, or None
+    when the worktree is gone.
+    """
+    try:
+        job = core.load_job(slug)
+    except OcError:
+        return None
+    path = job.get("dir") or ""
+    if not os.path.isdir(os.path.join(path, ".git")) and not os.path.isfile(os.path.join(path, ".git")):
+        return None
+    ref = snapshot_ref(slug)
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            env = dict(os.environ, GIT_INDEX_FILE=os.path.join(tmp, "index"))
+            for args in (["read-tree", "HEAD"], ["add", "-A"]):
+                subprocess.run(["git", *args], cwd=path, env=env, capture_output=True, timeout=60, check=True)
+            tree = subprocess.run(["git", "write-tree"], cwd=path, env=env, capture_output=True,
+                                  text=True, timeout=30, check=True).stdout.strip()
+        last = core.git("rev-parse", "--verify", "-q", ref + "^{commit}", cwd=path, check=False, timeout=5)
+        if last and core.git("rev-parse", last + "^{tree}", cwd=path, check=False, timeout=5) == tree:
+            return last  # nothing changed since the last snapshot
+        parent = last or core.git("rev-parse", "HEAD", cwd=path, check=False, timeout=5)
+        args = ["-c", "user.email=oc-connect@localhost", "-c", "user.name=oc-connect", "commit-tree", tree]
+        if parent:
+            args += ["-p", parent]
+        commit = subprocess.run(["git", *args], cwd=path, input=label or f"oc snapshot {slug}",
+                                capture_output=True, text=True, timeout=30, check=True).stdout.strip()
+        core.git("update-ref", ref, commit, cwd=path, timeout=10)
+        return commit
+    except (subprocess.SubprocessError, OSError, OcError):
+        return None  # a snapshot is a safety net, never a reason to fail the operation
+
+
+def snapshots(slug: str) -> str:
+    """The job's snapshots, newest first."""
+    job = core.load_job(slug)
+    ref = snapshot_ref(slug)
+    where = job["dir"] if os.path.isdir(job.get("dir") or "") else (job.get("repo") or "")
+    if not where:
+        raise OcError(f"neither worktree nor repository of {slug} is available")
+    # "--not HEAD" drops the repository's own history: only the job's snapshots are of interest here.
+    out = core.git("log", "--format=%h  %ad  %s", "--date=format:%Y-%m-%d %H:%M", "-20", ref, "--not", "HEAD",
+                   cwd=where, check=False, timeout=10)
+    if not out:
+        return f"no snapshots for {slug} yet (they are taken by `report`, `send`, `review` and `done`)"
+    return f"snapshots of {slug} ({ref}), newest first:\n" + out + \
+           f"\nRestore one with `restore` (the current state is snapshotted first)."
+
+
+def restore(slug: str, commit: Optional[str] = None) -> str:
+    """Put a snapshot back into the worktree - index and files, deletions included.
+
+    The state as it is now is snapshotted first, so a restore can itself be
+    undone. Without ``commit`` the newest snapshot is used.
+    """
+    job = core.load_job(slug)
+    path = job.get("dir") or ""
+    if not os.path.isdir(path):
+        raise OcError(f"worktree of {slug} is gone: {path} (the snapshots live in {snapshot_ref(slug)} "
+                      "of the repository)")
+    target = commit or snapshot_ref(slug)
+    # Resolve first: the safety snapshot below moves the ref to the state we are about to replace.
+    sha = core.git("rev-parse", "--verify", "-q", target + "^{commit}", cwd=path, check=False, timeout=5)
+    if not sha:
+        raise OcError(f"{target} is not a commit in this repository - see `snapshots {slug}`")
+    before = snapshot(slug, f"oc snapshot {slug}: state before restore")
+    core.git("read-tree", "-u", "--reset", sha, cwd=path, timeout=60)
+    _set(slug, review=None)  # the content changed; the old review no longer covers it
+    return (f"{slug}: worktree set to {sha[:9]}"
+            + (f" (state before the restore: {before[:9]})" if before else "")
+            + "\nThe recorded review was dropped - review this state before committing.")
 
 
 # --------------------------------------------------------------------------- tabs / lifecycle
@@ -546,11 +642,14 @@ def done(slug: str, force: bool = False) -> str:
         if problems:
             raise OcError(f"job {slug} still has " + " and ".join(problems)
                           + " - commit and push first, or pass force to discard it")
+    snap = snapshot(slug, f"oc snapshot {slug}: state when the job was removed")
     close(slug)
     if os.path.exists(wt):
         core.git("worktree", "remove", "--force", wt, cwd=repo)
     core.delete_job(slug)
-    return f"removed worktree {wt} (branch {job.get('branch')} kept)"
+    return f"removed worktree {wt} (branch {job.get('branch')} kept)" + (
+        f"\nlast state kept as {snap[:9]} in {snapshot_ref(slug)}: "
+        f"`git show {snapshot_ref(slug)}` in {repo}" if snap else "")
 
 
 def set_pr(slug: str, pr: str) -> str:

@@ -76,6 +76,9 @@ hunt for untested cases. Corrections go back with `send`. 6) Record the review w
 run, defeat test, known gaps). A commit hook blocks commits in a job worktree until the review for
 exactly that state is recorded. 7) Commit, push, open the PR; then `set_pr` and `close`. After merge:
 `done` (it refuses while unpushed work exists).
+The worker's result lies in the worktree uncommitted, so `report`, `send`, `review` and `done` each
+snapshot it first. If a review step, a correction or a wrong git command destroys the result, get it
+back with `restore` (`snapshots` lists the states) instead of asking the worker to do the work again.
 {agent_line}"""
 
 
@@ -155,6 +158,20 @@ TOOLS: Dict[str, Dict[str, Any]] = {
             "defeat_test": {"type": "string", "description": "what you broke and which test turned red"},
             "gaps": {"type": "string", "description": "what is not covered or not verified"}}},
     },
+    "snapshots": {
+        "description": "List the automatic snapshots of a job's worktree (taken by report, send, review "
+                       "and done). Use before `restore` to pick a state.",
+        "inputSchema": {"type": "object", "required": ["slug"], "properties": {"slug": _slug_schema()}},
+        "annotations": {"readOnlyHint": True},
+    },
+    "restore": {
+        "description": "Put a snapshot of the worker's result back into the job's worktree - after a bad "
+                       "correction round, a wrong `git checkout` or any other loss. The current state is "
+                       "snapshotted first, so this is reversible; the recorded review is dropped.",
+        "inputSchema": {"type": "object", "required": ["slug"], "properties": {
+            "slug": _slug_schema(),
+            "commit": {"type": "string", "description": "snapshot from `snapshots` (default: the newest)"}}},
+    },
     "set_pr": {
         "description": "Record the pull request of a job so status views show it.",
         "inputSchema": {"type": "object", "required": ["slug", "pr"], "properties": {
@@ -172,17 +189,50 @@ def _project_dir() -> str:
     return os.environ.get("CLAUDE_PROJECT_DIR") or os.getcwd()
 
 
+def _job_lines(r: Dict[str, Any], me: Any) -> str:
+    """One job as compact text.
+
+    Deliberately not JSON: the same facts cost a fraction of the tokens, and
+    every status call goes into Claude's context. Everything Claude needs to
+    decide the next step is here - state, progress, where the code is, what is
+    open - the rest is one `report` away.
+    """
+    owner = r.get("owner")
+    who = ("" if owner == me else
+           "  OWNED BY ANOTHER LIVE CLAUDE SESSION - leave it alone" if r.get("owner_alive") else "  (no owner)")
+    bits = []
+    if r.get("todo_total"):
+        bits.append(f"{r.get('todo_done', 0)}/{r['todo_total']} todos")
+    d = r.get("diff") or {}
+    if d.get("files"):
+        bits.append(f"{d['files']} files +{d['plus']} -{d['minus']}")
+    if r.get("cost"):
+        bits.append(f"${float(r['cost']):.2f}")
+    age = core.minutes_since(r.get("created"))
+    if age is not None:
+        bits.append(f"{age:.0f}m old")
+    if r.get("reviewed"):
+        bits.append("reviewed")
+    if r.get("pr"):
+        bits.append(f"PR {r['pr']}")
+    lines = [f"{r['slug']} [{r['state']}] {r.get('agent') or ''} {r.get('title') or ''}".rstrip() + who,
+             f"  {r.get('dir')} ({r.get('branch')})" + (("  " + ", ".join(bits)) if bits else "")]
+    if r.get("activity") and r["state"] in ("running", "waiting"):
+        lines.append(f"  last: {r['activity']}")
+    if r.get("error"):
+        lines.append(f"  ERROR: {r['error']}")
+    for p in r.get("pending", []):
+        opts = f" [options: {' | '.join(p.get('options') or [])}]" if p.get("options") else ""
+        lines.append(f"  {p['kind'].upper()} [{p['id']}]: {p['text']}{opts}")
+    return "\n".join(lines)
+
+
 def _status_text(_: Dict[str, Any]) -> str:
     rows = ops.status_all(detail=True)
     if not rows:
         return "no jobs"
     me = core.claude_pid()
-    for r in rows:
-        owner = r.pop("owner", None)
-        r["owner"] = ("this session" if owner == me else
-                      "another live Claude session - leave it alone" if r.pop("owner_alive", False) else "nobody")
-        r.pop("owner_alive", None)
-    return json.dumps(rows, indent=1, default=str)
+    return "\n".join(_job_lines(r, me) for r in rows)
 
 
 def _setup_text(_: Dict[str, Any]) -> str:
@@ -202,6 +252,8 @@ HANDLERS: Dict[str, Callable[[Dict[str, Any]], str]] = {
     "close": lambda a: ops.close(a["slug"]),
     "done": lambda a: ops.done(a["slug"], bool(a.get("force"))),
     "review": lambda a: ops.review(a["slug"], a["checks"], a["defeat_test"], a["gaps"]),
+    "snapshots": lambda a: ops.snapshots(a["slug"]),
+    "restore": lambda a: ops.restore(a["slug"], a.get("commit")),
     "set_pr": lambda a: ops.set_pr(a["slug"], a["pr"]),
     "setup": _setup_text,
 }

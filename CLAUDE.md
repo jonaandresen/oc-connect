@@ -30,7 +30,7 @@ Rules for changes:
 - In a config without the user's `permission` block the `question` tool is off - the worker said it had none. The profile allows it explicitly.
 - A session created by one server process is visible to another on the same machine (sessions are on disk). That is how the tab can start with `-s <session>`.
 - `/tui/select-session` right after the port answers is unreliable - the TUI is not listening yet and the tab stayed on the start screen.
-- With a flat-rate provider (OpenCode Go) every message reports cost 0, so `OC_BUDGET` never fires there.
+- A flat-rate provider (OpenCode Go) DOES report a cost per message: $0.01 for a small job on `deepseek-v4.1-flash` (measured 2026-09-20). The earlier claim of cost 0 was wrong. What the number is worth is another question - a subscription does not charge per message.
 
 **Terminal.app**
 - AppleScript lists every tab as its own window with one tab. A new tab is a new window id; "count of tabs" never grows.
@@ -43,8 +43,9 @@ Rules for changes:
 - The plugin `settings.json` key `subagentStatusLine` never ran (logged: zero calls while an agent ran). Reason not found.
 - A Haiku watcher agent told to return tool output unchanged summarised it anyway and reported a stale git state. Do not put a model between a job and the lead.
 - Plugin `bin/` is on the Bash PATH; `${CLAUDE_PLUGIN_ROOT}` changes with every version, so settings that must survive updates point to the shim `~/.local/state/oc-connect/bin/oc`, rewritten at every SessionStart.
+- A plugin's `.mcp.json` is ALSO read as project config when you work in the plugin's own checkout, and `${CLAUDE_PLUGIN_ROOT}` is empty there: `ENOENT ... /bin/oc`, a second server named `opencode` stuck on "Pending approval". Since 0.6.0 the config lives in `plugin.json` (`mcpServers`, inline object - a path or `.mcp.json` also work).
 
-## Verification status (2026-09-19, version 0.5.0)
+## Verification status (2026-09-20, version 0.6.0)
 
 Verified end to end, in a real Claude Code session with the installed plugin:
 - MCP tools and instructions load; `answer` via MCP reached the worker; a wrong question id is refused.
@@ -55,14 +56,20 @@ Verified end to end, in a real Claude Code session with the installed plugin:
 - Worker profile: `oc-fast` ran on deepseek-v4.1-flash without oh-my-opencode and superpowers, asked via the question tool, wrote the file, gave the report in the prompt's format.
 - `oc selftest`: direct push and docker blocked by the guard, indirect forms by the environment, nothing reached the remote; with a permissive guard it reports NOT PROVEN (defeat test).
 
-Unit tests: 44, green on Python 3.14 and 3.9.
+Three real jobs in a scratch repo (2026-09-20, `oc-fast` on `opencode-go/deepseek-v4.1-flash`), each the full cycle:
+- Input validation plus tests: 11 tests, defeat test by the worker and by Claude, diff clean, review recorded, commit denied before the review and allowed after it, push, `done`.
+- Rounding mode: the worker used its `question` tool for the open decision, waited, and implemented exactly the answered mode (`ROUND_HALF_UP`). Answer via `answer` with the question id.
+- Snapshot probe: `report` snapshotted the result, `git checkout --` destroyed it, `restore` brought it back; after `done --force` the state was still readable from `refs/oc/snaptest`.
+Timings: `delegate` to task sent 17 s (about 1.5 s of it the short-lived server for the session), small job finished after 65 s, job with a question about 100 s. `oc status` 6-26 ms, status line 50-90 ms per redraw - the poll loop is not a cost factor.
+
+Unit tests: 51, green on Python 3.14 and 3.9.
 
 ## Open
 
 1. **Vibe Island click → tab.** The session shows up; whether a click jumps into its tab is not confirmed.
 2. **Status line rows** (`▶ slug …` under the Open Island line) have not been confirmed on screen in a live session.
-3. **Quality of the worker profile.** Only probe jobs so far. Run a real, small task (e.g. missing tests in a project) and compare the review findings with earlier runs of oh-my-opencode's orchestrator.
+3. **Quality of the worker profile.** Three real tasks were clean (see above): test-first, honest defeat test, no scope creep, an open decision asked instead of guessed. Still open: a task in a real project with real history, and a comparison with oh-my-opencode's orchestrator.
 4. **Terminals other than Terminal.app** (iTerm2, WezTerm, kitty, tmux) are implemented but untested.
 5. **Agent panel row.** Would need a subagent (a model call) and the plugin's `subagentStatusLine` did not run. Parked unless Claude Code offers rows for non-model tasks.
 6. **Before making the repo public:** switch the commit author e-mail to the GitHub noreply address; decide whether to port to TypeScript for the official MCP and OpenCode SDKs (the MCP protocol and the OpenCode API are hand-rolled here).
-7. **Budget on flat-rate providers:** OpenCode reports no cost, and the provider quota is not readable - no cost warning there.
+7. **Budget on flat-rate providers:** the cost per message is reported (see above), but it does not describe a subscription's real limit, and the provider quota is not readable.

@@ -22,7 +22,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 
 STATE_DIR = os.environ.get("OC_STATE") or os.path.expanduser("~/.local/state/oc-connect")
 JOBS_DIR = os.path.join(STATE_DIR, "jobs")

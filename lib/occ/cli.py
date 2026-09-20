@@ -118,6 +118,12 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--defeat-test", required=True)
     s.add_argument("--gaps", required=True)
 
+    s = sub.add_parser("snapshots", help="list the automatic snapshots of a job's worktree")
+    s.add_argument("slug")
+    s = sub.add_parser("restore", help="put a snapshot back into the job's worktree")
+    s.add_argument("slug")
+    s.add_argument("commit", nargs="?", help="snapshot to restore (default: the newest)")
+
     s = sub.add_parser("pr", help="remember the PR of a job (shown in status and board)")
     s.add_argument("slug")
     s.add_argument("pr")
@@ -167,6 +173,10 @@ def main(argv=None) -> int:
             print(ops.done(args.slug, args.force))
         elif args.cmd == "review":
             print(ops.review(args.slug, args.checks, args.defeat_test, args.gaps))
+        elif args.cmd == "snapshots":
+            print(ops.snapshots(args.slug))
+        elif args.cmd == "restore":
+            print(ops.restore(args.slug, args.commit))
         elif args.cmd == "pr":
             print(ops.set_pr(args.slug, args.pr))
         elif args.cmd == "setup":

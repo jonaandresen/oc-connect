@@ -75,9 +75,17 @@ def _short_title(st: Dict[str, Any]) -> str:
     return parts[1] if parts[0].startswith("#") and len(parts) > 1 else title
 
 
+def _fit(text: str, width: int) -> str:
+    """Pad to ``width``; mark a cut with '…' so nobody reads a truncated name as the real one."""
+    text = text or ""
+    if len(text) > width:
+        return text[:width - 1] + "…"
+    return text.ljust(width)
+
+
 def row(st: Dict[str, Any], name_width: int = 17, title_width: int = 32) -> Optional[str]:
     """One status row, or None for jobs that need no attention."""
-    head = f"{st['slug'][:name_width]:<{name_width}} {_short_title(st)[:title_width]:<{title_width}}"
+    head = f"{_fit(st['slug'], name_width)} {_fit(_short_title(st), title_width)}"
     state = st["state"]
     if state == "waiting" and st.get("pending"):
         p = st["pending"][0]

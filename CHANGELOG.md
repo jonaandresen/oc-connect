@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.0
+
+- Snapshots: the worker's result is recorded as a commit under `refs/oc/<slug>` before `report`, `send`, `review` and `done`. `restore` puts a snapshot back (the state before the restore is snapshotted first, the recorded review is dropped), `snapshots` lists them. Found in real use: a single `git checkout --` during a review destroyed a finished result that nothing could reproduce. Snapshots survive `done --force`, so a removed worktree can still be recovered from the repository.
+- `status` (MCP) answers in compact text instead of JSON - same facts, a fraction of the tokens in Claude's context.
+- The MCP server configuration moved from `.mcp.json` into `plugin.json`. Working *on* the plugin no longer started a second, broken `opencode` server: in a project checkout Claude Code read the plugin's `.mcp.json` as project config, where `${CLAUDE_PLUGIN_ROOT}` is not set (`ENOENT ... /bin/oc`).
+- Status line: a name or title that does not fit is marked with `…` instead of being cut silently.
+- Measured and corrected: with a flat-rate provider (OpenCode Go) OpenCode *does* report a cost per message, so `OC_BUDGET` works there too.
+
 ## 0.5.0
 
 - Own worker profile (default): workers get an OpenCode config of their own via `XDG_CONFIG_HOME` - none of the user's OpenCode plugins, logins, MCP servers and session-tracker plugin files kept, other tools' config mirrored. Agents `oc-fast`, `oc-strong`, `oc-ui` are primary (the tab shows the right one), take their models from oh-my-opencode roles, and share a worker prompt for this workflow. `OC_PROFILE=inherit` / option `worker_profile` keeps the old behaviour.
