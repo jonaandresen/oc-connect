@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.0
+
+- You decide whether work goes to OpenCode. New default mode `ask`: every delegation brings up Claude Code's confirmation dialog with title, agent and task. `off` refuses unless your latest message asked for OpenCode, and then asks too. The gate is a PreToolUse hook on `delegate` and on `oc start` in Bash, so it does not depend on the model following instructions; a hook's "ask" shows the dialog even under `--dangerously-skip-permissions` (measured).
+- `/oc:mode` (CLI `oc mode`) shows or switches the mode at any time; it wins over the plugin option until `/oc:mode default`.
+- Workers open in their own window by default, so they can sit next to Claude; option `worker_terminal` / `OC_OPEN=tab` keeps tabs. WezTerm, kitty and iTerm2 get the same choice (untested).
+
 ## 0.7.0
 
 - Worker tabs close once Claude no longer uses them. Every tab starts a small reaper beside OpenCode. It stops the worker when the job has been idle (finished or failed, nothing pending) for `OC_IDLE_CLOSE_MIN` minutes (default 20, `0` = off), or when the Claude session that owns the job has ended and no other session adopted it within two minutes. A busy worker or one waiting for an answer is never stopped. Worktree and session stay; `status` shows why a worker was closed.

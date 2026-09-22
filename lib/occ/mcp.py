@@ -21,12 +21,12 @@ from typing import Any, Callable, Dict
 from . import core, ops
 from .core import OcError
 
-AUTONOMY = (os.environ.get("OC_AUTONOMY") or "mechanical").strip().lower()
-
 _AUTONOMY_RULES = {
-    "off": "Never delegate on your own. Use these tools only when the user explicitly asks for OpenCode.",
-    "ask": "Before delegating, ask the user in one short question (recommend yes or no). "
-           "Explicit user requests (\"do this with OpenCode\") need no question.",
+    "off": "Never delegate on your own. Only when the user explicitly asks for OpenCode, call `delegate`; "
+           "any other call is refused.",
+    "ask": "When a task fits, call `delegate` directly - do NOT ask in the chat first: Claude Code shows the "
+           "user a confirmation dialog with the job, and the user decides there. If the user declines, do "
+           "the work yourself or ask how to proceed; do not retry the same delegation.",
     "mechanical": "Delegate WITHOUT asking when the task is well-bounded implementation work: writing or "
                   "extending tests, mechanical refactors and renames, small UI/frontend changes, docs, "
                   "follow-up fixes with a clear spec. Say in one line that you delegated and to which agent. "
@@ -52,11 +52,13 @@ def instructions() -> str:
                       + ", ".join(f"{k}={v}" for k, v in agents.items()) + ".")
     else:
         agent_line = "Agent: OpenCode's built-in `build` (oh-my-opencode not installed; that is fine)."
+    mode = core.autonomy()
     return f"""oc-connect lets you hand implementation tasks to OpenCode workers running on cheaper models.
 Each job gets its own git worktree, its own OpenCode process and its own terminal tab the user can watch
 (session trackers such as Vibe Island show every job). Workers cannot commit, push, run docker or ssh.
 
-WHEN TO DELEGATE ({AUTONOMY}): {_AUTONOMY_RULES.get(AUTONOMY, _AUTONOMY_RULES['mechanical'])}
+WHEN TO DELEGATE ({mode}): {_AUTONOMY_RULES[mode]}
+The user controls this: a confirmation dialog in modes off and ask, `/oc:mode` switches the mode.
 Good fits: bounded implementation with a clear spec you can write down. Bad fits: exploration or
 questions (a Claude subagent is cheaper, since you would review the worker's output anyway), anything
 touching money, payments, auth, security or data deletion, and tasks with an open product decision.

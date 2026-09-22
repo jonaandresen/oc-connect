@@ -7,7 +7,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
+from typing import Optional
 
 from . import core, ops
 from .core import OcError
@@ -145,8 +147,25 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("install-statusline", help="add job rows under your existing Claude Code status line")
     s.add_argument("--dry-run", action="store_true")
     s = sub.add_parser("hook", help="Claude Code hook entry point")
-    s.add_argument("event", choices=["session-start", "prompt-submit", "pre-bash"])
+    s.add_argument("event", choices=["session-start", "prompt-submit", "pre-bash", "pre-delegate"])
+    s = sub.add_parser("mode", help="show or set when Claude may delegate: off, ask, mechanical, auto, default")
+    s.add_argument("value", nargs="?")
     return p
+
+
+MODE_TEXT = {
+    "off": "Claude never delegates on its own; when you ask for OpenCode, you confirm in a dialog.",
+    "ask": "Claude may propose a delegation; every one needs your confirmation in a dialog.",
+    "mechanical": "Claude delegates bounded work (tests, docs, small UI) without asking; larger work after one "
+                  "question. No dialog.",
+    "auto": "Claude delegates on its own judgement. No dialog.",
+}
+
+
+def cmd_mode(value: Optional[str]) -> str:
+    mode = core.set_autonomy(value) if value else core.autonomy()
+    src = "set by `oc mode`" if os.path.exists(core.AUTONOMY_FILE) else "plugin option or default"
+    return f"delegation mode: {mode} ({src}) - {MODE_TEXT[mode]}"
 
 
 def main(argv=None) -> int:
@@ -211,7 +230,9 @@ def main(argv=None) -> int:
         elif args.cmd == "hook":
             from . import hooks
             {"session-start": hooks.session_start, "prompt-submit": hooks.prompt_submit,
-             "pre-bash": hooks.pre_bash}[args.event]()
+             "pre-bash": hooks.pre_bash, "pre-delegate": hooks.pre_delegate}[args.event]()
+        elif args.cmd == "mode":
+            print(cmd_mode(args.value))
     except OcError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
         return 1

@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "oc",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Claude Code as the lead, OpenCode as the workers: delegate bounded coding tasks to OpenCode, one git worktree and one terminal tab per job (visible in Vibe Island and similar trackers), live status in Claude Code, and Claude reviews every diff before anything is committed.",
   "author": {
     "name": "Jona Andresen"
@@ -24,7 +24,8 @@
       ],
       "env": {
         "OC_AUTONOMY": "${user_config.autonomy}",
-        "OC_PROFILE": "${user_config.worker_profile}"
+        "OC_PROFILE": "${user_config.worker_profile}",
+        "OC_OPEN": "${user_config.worker_terminal}"
       }
     }
   },
@@ -32,14 +33,14 @@
     "autonomy": {
       "type": "string",
       "title": "When may Claude delegate on its own?",
-      "description": "mechanical: bounded work (tests, docs, small UI) without asking, larger work after one question. ask: always ask. auto: Claude decides. off: only when you say so.",
+      "description": "ask: every delegation needs your OK in a confirmation dialog. off: only when you ask for OpenCode, and you confirm in the dialog. mechanical: bounded work (tests, docs, small UI) without asking, larger work after one question. auto: Claude decides. /oc:mode switches at any time.",
       "options": [
-        "mechanical",
         "ask",
-        "auto",
-        "off"
+        "off",
+        "mechanical",
+        "auto"
       ],
-      "default": "mechanical"
+      "default": "ask"
     },
     "worker_profile": {
       "type": "string",
@@ -50,6 +51,16 @@
         "inherit"
       ],
       "default": "isolated"
+    },
+    "worker_terminal": {
+      "type": "string",
+      "title": "Where does a worker open?",
+      "description": "window: its own terminal window, to place next to Claude and watch both. tab: a new tab in Claude's terminal window (Terminal.app needs Accessibility permission for this).",
+      "options": [
+        "window",
+        "tab"
+      ],
+      "default": "window"
     }
   }
 }

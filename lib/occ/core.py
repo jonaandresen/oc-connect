@@ -559,6 +559,48 @@ def opencode_setup() -> Dict[str, Any]:
     }
 
 
+AUTONOMY_MODES = ("off", "ask", "mechanical", "auto")
+AUTONOMY_FILE = os.path.join(STATE_DIR, "autonomy")
+
+
+def autonomy() -> str:
+    """When Claude may delegate: ``off``, ``ask`` (default), ``mechanical`` or ``auto``.
+
+    ``oc mode`` (``/oc:mode``) writes an override that wins over the plugin
+    option, so the user can switch without the settings dialog. Hooks get the
+    option as ``CLAUDE_PLUGIN_OPTION_AUTONOMY``, the MCP server as ``OC_AUTONOMY``.
+    """
+    try:
+        with open(AUTONOMY_FILE) as fh:
+            mode = fh.read().strip().lower()
+        if mode in AUTONOMY_MODES:
+            return mode
+    except OSError:
+        pass
+    for var in ("CLAUDE_PLUGIN_OPTION_AUTONOMY", "OC_AUTONOMY"):
+        mode = (os.environ.get(var) or "").strip().lower()
+        if mode in AUTONOMY_MODES:
+            return mode
+    return "ask"
+
+
+def set_autonomy(mode: Optional[str]) -> str:
+    """Set the override; ``None`` or ``default`` removes it (the plugin option applies again)."""
+    if mode in (None, "", "default"):
+        try:
+            os.remove(AUTONOMY_FILE)
+        except OSError:
+            pass
+        return autonomy()
+    mode = mode.strip().lower()
+    if mode not in AUTONOMY_MODES:
+        raise OcError(f"unknown mode {mode!r} - use one of {', '.join(AUTONOMY_MODES)} or default")
+    _ensure_dirs()
+    with open(AUTONOMY_FILE, "w") as fh:
+        fh.write(mode + "\n")
+    return mode
+
+
 def default_agent(omo_installed: Optional[bool] = None) -> str:
     if os.environ.get("OC_AGENT"):
         return os.environ["OC_AGENT"]

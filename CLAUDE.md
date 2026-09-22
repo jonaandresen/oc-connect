@@ -40,6 +40,7 @@ Rules for changes:
 - OpenCode sets its own tab title ("OC | <session title>") and resets it to "Terminal" when it exits (measured 2026-09-22). Finding dead tabs by the "OC" title therefore failed; they are tracked by window id (`terminal-windows` in the state dir), and a tab is closed only when `count of processes` is 0 (an idle shell has processes, so user tabs are safe).
 - OpenCode needs about 1.2 s to exit after SIGTERM; until then the tab still holds it and cannot be closed.
 - The tab's login shell does NOT inherit Claude Code's environment. Anything the tab needs from it (e.g. `OC_IDLE_CLOSE_MIN`) goes into the command line.
+- While Claude's window is in full screen, macOS turns a new Terminal window (`do script`) into a tab of it: the system default "Prefer tabs when opening documents: In Full Screen" (`AppleWindowTabbingMode` unset). Seen as identical bounds and a tab bar appearing on Claude's window.
 - A background process started in the tab keeps the tab busy unless it leaves the tty session: the reaper calls `setsid()` (its tty shows as `??`).
 
 **Claude Code**
@@ -47,9 +48,11 @@ Rules for changes:
 - The plugin `settings.json` key `subagentStatusLine` never ran (logged: zero calls while an agent ran). Reason not found.
 - A Haiku watcher agent told to return tool output unchanged summarised it anyway and reported a stale git state. Do not put a model between a job and the lead.
 - Plugin `bin/` is on the Bash PATH; `${CLAUDE_PLUGIN_ROOT}` changes with every version, so settings that must survive updates point to the shim `~/.local/state/oc-connect/bin/oc`, rewritten at every SessionStart.
+- A PreToolUse hook returning `permissionDecision: "ask"` brings up the confirmation dialog even in a session started with `--dangerously-skip-permissions` (measured 2.1.280 with a hook on an MCP tool; the user saw and confirmed the dialog). Hooks in `.claude/settings.local.json` took effect without a restart. This is what makes the delegation gate hard.
+- Plugin `userConfig` reaches hooks as `CLAUDE_PLUGIN_OPTION_<KEY>` and the MCP server via `${user_config.KEY}` in `plugin.json` env (the latter measured; the hook variable is from the docs and not yet seen live). Shell-form hook commands reject `${user_config.*}`.
 - A plugin's `.mcp.json` is ALSO read as project config when you work in the plugin's own checkout, and `${CLAUDE_PLUGIN_ROOT}` is empty there: `ENOENT ... /bin/oc`, a second server named `opencode` stuck on "Pending approval". Since 0.6.0 the config lives in `plugin.json` (`mcpServers`, inline object - a path or `.mcp.json` also work).
 
-## Verification status (2026-09-22, version 0.7.0)
+## Verification status (2026-09-22, version 0.8.0)
 
 Verified end to end, in a real Claude Code session with the installed plugin:
 - MCP tools and instructions load; `answer` via MCP reached the worker; a wrong question id is refused.
@@ -69,11 +72,13 @@ Timings: `delegate` to task sent 17 s (about 1.5 s of it the short-lived server 
 Reaper (2026-09-22, scratch repo, `oc-fast` on `opencode-go/deepseek-v4.1-flash`): with `OC_IDLE_CLOSE_MIN=1` an idle worker was stopped after ~75 s and its tab closed; the reason showed in `status`. `send` to the stopped worker reopened the tab in the same session and the worker answered. The owner-ended path is covered by unit tests only - while a session runs, its monitor adopts orphaned jobs, so it cannot be provoked live from inside one.
 Vibe Island: clicking the job's session brought its OpenCode terminal to the front (confirmed by the user, 2026-09-22). In that run the worker opened as its own window, not as a tab of Claude's window.
 
-Unit tests: 64, green on Python 3.14 and 3.9.
+Not yet seen live with the installed plugin (needs a restart): the delegate gate from the plugin's own `hooks.json`, `CLAUDE_PLUGIN_OPTION_AUTONOMY` in the hook, `/oc:mode`.
+
+Unit tests: 74, green on Python 3.14 and 3.9.
 
 ## Open
 
-1. **Tab or window.** The worker opened as a separate window in the last live run although `_terminal_app_tab` prefers a tab via the Shell menu. Which one is better for watching, and whether the menu click works on this machine, is undecided.
+1. **Tab or window.** Default is now `window` (option `worker_terminal`). In full screen macOS still makes it a tab (see Terminal.app facts); whether the Shell-menu click of `tab` mode works on this machine is not re-checked.
 2. **Status line rows** (`▶ slug …` under the Open Island line) have not been confirmed on screen in a live session.
 3. **Quality of the worker profile.** Three real tasks were clean (see above): test-first, honest defeat test, no scope creep, an open decision asked instead of guessed. Still open: a task in a real project with real history, and a comparison with oh-my-opencode's orchestrator.
 4. **Terminals other than Terminal.app** (iTerm2, WezTerm, kitty, tmux) are implemented but untested.

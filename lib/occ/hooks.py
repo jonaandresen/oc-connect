@@ -10,7 +10,14 @@ point of the whole design; this makes skipping it impossible by accident.
 
 ``prompt_submit``: when the user says "do this with OpenCode" (German or
 English), adds a note so Claude delegates instead of implementing. Pure regex,
-no network: it runs on every prompt.
+no network: it runs on every prompt. It also records whether the latest prompt
+asked for OpenCode, for the delegation gate.
+
+``pre_delegate`` (and ``pre_bash`` for ``oc start``): the user's control over
+delegation, enforced outside the model. Mode ``ask`` shows Claude Code's
+confirmation dialog for every delegation; ``off`` refuses unless the latest
+prompt asked for OpenCode, and then asks too. A hook's "ask" brings up the
+dialog even under ``--dangerously-skip-permissions`` (measured, 2.1.280).
 """
 from __future__ import annotations
 
@@ -41,6 +48,66 @@ _DELEGATE_RE = re.compile("|".join(DELEGATE_PATTERNS), re.I)
 
 def wants_delegation(prompt: str) -> bool:
     return bool(_DELEGATE_RE.search(prompt or ""))
+
+
+PROMPTS_DIR = os.path.join(core.STATE_DIR, "prompts")
+
+
+def _prompt_file() -> str:
+    return os.path.join(PROMPTS_DIR, str(core.claude_pid() or "none"))
+
+
+def record_prompt(prompt: str) -> None:
+    """Remember whether this session's latest prompt asked for OpenCode."""
+    os.makedirs(PROMPTS_DIR, exist_ok=True)
+    with open(_prompt_file(), "w") as fh:
+        fh.write("1" if wants_delegation(prompt) else "0")
+
+
+def user_asked() -> bool:
+    try:
+        with open(_prompt_file()) as fh:
+            return fh.read().strip() == "1"
+    except OSError:
+        return False
+
+
+def _decision(kind: str, reason: str) -> dict:
+    return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": kind,
+                                   "permissionDecisionReason": reason}}
+
+
+def delegate_gate(what: str) -> "dict | None":
+    """Hook output for a delegation attempt, or None to let it through."""
+    mode = core.autonomy()
+    if mode in ("mechanical", "auto"):
+        return None
+    if mode == "off" and not user_asked():
+        return _decision("deny", "oc-connect: delegation is switched off (mode off). The user did not ask for "
+                                 "OpenCode - do the work yourself. `/oc:mode` changes the mode.")
+    return _decision("ask", f"Delegate to OpenCode? {what}")
+
+
+def _task_summary(tool_input: dict) -> str:
+    task = " ".join((tool_input.get("task") or "").split())
+    bits = [tool_input.get("title") or tool_input.get("slug") or "?",
+            f"agent {tool_input.get('agent') or core.default_agent()}"]
+    if tool_input.get("model"):
+        bits.append(f"model {tool_input['model']}")
+    return " | ".join(bits) + (f" | task: {task[:300]}{'…' if len(task) > 300 else ''}" if task else "")
+
+
+def pre_delegate() -> None:
+    try:
+        data = json.loads(sys.stdin.read() or "{}")
+    except ValueError:
+        return
+    out = delegate_gate(_task_summary(data.get("tool_input") or {}))
+    if out:
+        print(json.dumps(out))
+
+
+_OC_START_RE = re.compile(r"(?:^|[\s;&|(/])oc\s+start\b")
 
 
 def install_shim() -> str:
@@ -127,6 +194,11 @@ def pre_bash() -> None:
     except ValueError:
         return
     command = (data.get("tool_input") or {}).get("command", "")
+    if _OC_START_RE.search(command):  # the CLI path around the MCP tool
+        out = delegate_gate(f"via Bash: {command[:300]}")
+        if out:
+            print(json.dumps(out))
+            return
     if "commit" not in command:
         return
     for d in commit_dirs(command, data.get("cwd") or os.getcwd()):
@@ -168,6 +240,10 @@ def prompt_submit() -> None:
         data = json.loads(sys.stdin.read() or "{}")
     except ValueError:
         return
+    try:
+        record_prompt(data.get("prompt", ""))
+    except OSError:
+        pass
     if not wants_delegation(data.get("prompt", "")):
         return
     _emit("UserPromptSubmit",

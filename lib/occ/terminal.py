@@ -22,6 +22,11 @@ WINDOWS_FILE = os.path.join(os.environ.get("OC_STATE") or os.path.expanduser("~/
                             "terminal-windows")
 
 
+def open_mode() -> str:
+    """``window`` (default) or ``tab``, from the plugin option / ``OC_OPEN``."""
+    return "tab" if (os.environ.get("OC_OPEN") or "").strip().lower() == "tab" else "window"
+
+
 def _terminal() -> str:
     return os.environ.get("OC_TERMINAL") or os.environ.get("TERM_PROGRAM") or ""
 
@@ -106,6 +111,19 @@ def close_dead_tabs() -> None:
         _save_windows([i for i in ids if i in still])
 
 
+def _terminal_app_window(command: str) -> str:
+    """New window in Terminal.app via ``do script``: no menu click, no Accessibility permission."""
+    if not shutil.which("osascript"):
+        return ""
+    out = subprocess.run(["osascript", "-"], capture_output=True, text=True, timeout=30, input=f'''
+tell application "Terminal"
+  activate
+  do script {_as_string(command)}
+  return "window " & (id of front window)
+end tell''')
+    return out.stdout.strip() if out.returncode == 0 else ""
+
+
 def _terminal_app_tab(command: str) -> str:
     """New tab in Terminal.app, falling back to a new window.
 
@@ -161,7 +179,7 @@ end tell''')
 
 
 def open_tab(title: str, command: str, cwd: Optional[str] = None) -> str:
-    """Run ``command`` in a new tab of the terminal Claude Code runs in.
+    """Run ``command`` in a new window or tab (``open_mode``) of the terminal Claude Code runs in.
 
     Returns a one-line description of what happened. ``command`` is a shell
     command line; it is run by a login shell so PATH matches the user's.
@@ -171,21 +189,22 @@ def open_tab(title: str, command: str, cwd: Optional[str] = None) -> str:
     # Set the tab title from inside, works in every terminal that honours OSC 0.
     full = f"printf '\\033]0;%s\\007' {shlex.quote(title)}; {command}"
     term = _terminal()
+    tab = open_mode() == "tab"
     close_dead_tabs()
 
     if os.environ.get("TMUX") and shutil.which("tmux"):
         if subprocess.run(["tmux", "new-window", "-n", title, full]).returncode == 0:
             return f"tmux window: {title}"
     if term == "WezTerm" and shutil.which("wezterm"):
-        if subprocess.run(["wezterm", "cli", "spawn", "--", "bash", "-lc", full],
-                          capture_output=True).returncode == 0:
-            return f"WezTerm tab: {title}"
+        if subprocess.run(["wezterm", "cli", "spawn"] + ([] if tab else ["--new-window"])
+                          + ["--", "bash", "-lc", full], capture_output=True).returncode == 0:
+            return f"WezTerm {'tab' if tab else 'window'}: {title}"
     if term in ("kitty", "xterm-kitty") and shutil.which("kitty"):
-        if subprocess.run(["kitty", "@", "launch", "--type=tab", "--tab-title", title, "bash", "-lc", full],
-                          capture_output=True).returncode == 0:
-            return f"kitty tab: {title}"
+        if subprocess.run(["kitty", "@", "launch", "--type=tab" if tab else "--type=os-window",
+                           "--tab-title", title, "bash", "-lc", full], capture_output=True).returncode == 0:
+            return f"kitty {'tab' if tab else 'window'}: {title}"
     if term == "iTerm.app":
-        if _osascript(f'''
+        if tab and _osascript(f'''
 tell application "iTerm2"
   tell current window
     set t to (create tab with default profile)
@@ -193,12 +212,20 @@ tell application "iTerm2"
   end tell
 end tell'''):
             return f"iTerm tab: {title}"
+        if not tab and _osascript(f'''
+tell application "iTerm2"
+  set w to (create window with default profile)
+  tell current session of w to write text {_as_string(full)}
+end tell'''):
+            return f"iTerm window: {title}"
     if term in ("Apple_Terminal", ""):
-        res = _terminal_app_tab(full)
+        res = _terminal_app_tab(full) if tab else _terminal_app_window(full)
         remember_window(res)
         res = res.split(" ")[0]
         if res == "tab":
             return f"Terminal tab: {title}"
+        if res == "window" and not tab:
+            return f"Terminal window: {title}"
         if res == "window":
             return (f"Terminal WINDOW: {title} (a new tab could not be verified; tabs need System Settings > "
                     "Privacy & Security > Accessibility > Terminal)")

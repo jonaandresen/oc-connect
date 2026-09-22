@@ -16,7 +16,7 @@ you ──► Claude Code (lead) ──task──► OpenCode worker (tab "OC 27
 | | |
 |---|---|
 | **Claude always knows** | An MCP server gives every session the tools (`delegate`, `status`, `answer`, …) and the rules for when delegating is worth it. No need to remember a command. |
-| **Claude decides, or you do** | Default: bounded work (tests, docs, small UI, mechanical refactors) is delegated without asking; larger work after one question; money, auth, security and open product decisions never. Say "do this with OpenCode" and it is delegated, full stop. Configurable. |
+| **You decide** | Default: every delegation needs your OK in Claude Code's confirmation dialog, which shows title, agent and task. A hook enforces it, not the model's good behaviour - it also works under `--dangerously-skip-permissions`. `/oc:mode` switches between `off`, `ask`, `mechanical` and `auto` at any time. Money, auth, security and open product decisions are never delegated. |
 | **Live in Claude Code** | Rows under your status line: `▶ 276  Orders after payment  ███████░░░ 14/18  15 files +169 -65  oc-fast  26m`, `? 301 asks: …`, `✗ 288 APIError: …`. |
 | **Push, not poll** | A background monitor tells Claude the moment a worker runs, asks something (with a question id), finishes, fails, stalls, gets expensive or dies. Each job belongs to the Claude session that started it, so two open sessions never answer the same question. |
 | **One job = one worktree = one tab = one process** | Session trackers such as **Vibe Island** and **Open Island** show every job separately, and a click jumps to its tab (verified with Vibe Island). Closing the tab stops the worker, and the tab closes itself once Claude no longer uses the job (idle, or its Claude session ended). |
@@ -47,7 +47,7 @@ Restart Claude Code, then run **`/oc:setup`** once. It checks OpenCode, proves t
 Just talk:
 
 - "Do #276 with OpenCode." / "Gib das an OpenCode."
-- "Write the missing tests for the cart" - Claude may delegate this on its own and says so in one line.
+- "Write the missing tests for the cart" - Claude may propose OpenCode for this; you confirm or decline in the dialog.
 
 Commands:
 
@@ -58,6 +58,7 @@ Commands:
 | `/oc:board` | Live board in a new tab (`1`-`9` opens a job, `q` quits) |
 | `/oc:show <job>` | Open a job's tab (restarts a stopped worker in the same session) |
 | `/oc:stop <job>` | Stop a worker; worktree and session stay |
+| `/oc:mode [off\|ask\|mechanical\|auto\|default]` | Show or switch when Claude may delegate |
 | `/oc:setup` | Check, selftest, status line |
 
 The CLI does the same from any shell: `oc --help` (inside Claude Code `oc` is on the Bash PATH).
@@ -72,14 +73,18 @@ The CLI does the same from any shell: `oc --help` (inside Claude Code `oc` is on
 
 ## Configuration
 
-**Autonomy** (asked when the plugin is enabled, change via `/plugin` → oc → configure):
+**Delegation mode** (asked when the plugin is enabled, change via `/plugin` → oc → configure, or at any time with `/oc:mode`, which wins over the option until `/oc:mode default`):
 
 | Value | Behaviour |
 |---|---|
-| `mechanical` (default) | Bounded work without asking, larger work after one question |
-| `ask` | Always ask first |
-| `auto` | Claude decides |
-| `off` | Only when you say so |
+| `ask` (default) | Claude calls `delegate` when a task fits; every delegation shows a confirmation dialog |
+| `off` | Refused unless your latest message asked for OpenCode - and then you still confirm in the dialog |
+| `mechanical` | Bounded work without asking, larger work after one question; no dialog |
+| `auto` | Claude decides; no dialog |
+
+The gate covers the `delegate` tool and `oc start` run through Bash.
+
+**Worker terminal** (`window` or `tab`, same place): `window` (default) opens each worker in its own window that you can place next to Claude; `tab` adds a tab to Claude's window (Terminal.app needs Accessibility permission for that). macOS turns new windows into tabs anyway while the front window is in full screen, when *System Settings → Desktop & Dock → Prefer tabs when opening documents* is "In Full Screen" (the default) - set it to "Never" or leave full screen to get real windows.
 
 **Environment variables** (optional):
 
@@ -93,6 +98,7 @@ The CLI does the same from any shell: `oc --help` (inside Claude Code `oc` is on
 | `OC_COPY` | git-ignored `.env`, `.env.local`, … | Files copied into each worktree (space separated) |
 | `OC_INSTALL` | `1` | `0` skips dependency installation |
 | `OC_TERMINAL` | `$TERM_PROGRAM` | Force a terminal |
+| `OC_OPEN` | `window` | `tab` opens workers as tabs (set by the plugin option for the MCP server) |
 | `OC_STATE` | `~/.local/state/oc-connect` | Job state and the guard |
 | `OC_STATUSLINE_ALIGN` | `left` | `right` aligns the job rows right |
 | `OC_STALL_MIN` | `15` | Minutes without activity before the monitor reports a stall |

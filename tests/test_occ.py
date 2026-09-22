@@ -704,6 +704,97 @@ class DeadTabs(unittest.TestCase):
             terminal.close_dead_tabs()
         self.assertEqual(terminal._our_windows(), [456])
 
+    def test_window_is_the_default_and_tab_is_an_option(self):
+        env = {"TERM_PROGRAM": "Apple_Terminal", "OC_TERMINAL": "", "TMUX": ""}
+        for mode, expect in ((None, "window"), ("window", "window"), ("tab", "tab"), ("nonsense", "window")):
+            e = dict(env, OC_OPEN=mode) if mode else env
+            with mock.patch.dict(os.environ, e), \
+                    mock.patch.object(terminal, "close_dead_tabs"), \
+                    mock.patch.object(terminal, "_terminal_app_window", return_value="window 7") as win, \
+                    mock.patch.object(terminal, "_terminal_app_tab", return_value="tab 8") as tab:
+                if mode is None:
+                    os.environ.pop("OC_OPEN", None)
+                out = terminal.open_tab("OC x", "true")
+            self.assertEqual((win.called, tab.called), (expect == "window", expect == "tab"), mode)
+            self.assertIn(f"Terminal {expect}:", out)
+
+
+class DelegationControl(unittest.TestCase):
+    """The user decides whether work goes to OpenCode - enforced by hooks, not by the model."""
+
+    def setUp(self):
+        core.set_autonomy(None)
+        self.env = mock.patch.dict(os.environ, {"CLAUDE_PLUGIN_OPTION_AUTONOMY": "", "OC_AUTONOMY": ""})
+        self.env.start()
+        self.addCleanup(self.env.stop)
+        self.addCleanup(core.set_autonomy, None)
+        self.pid = mock.patch.object(core, "claude_pid", return_value=777)
+        self.pid.start()
+        self.addCleanup(self.pid.stop)
+
+    def gate(self, mode, prompt):
+        core.set_autonomy(mode)
+        hooks.record_prompt(prompt)
+        out = hooks.delegate_gate("x")
+        return out and out["hookSpecificOutput"]["permissionDecision"]
+
+    def test_default_mode_is_ask(self):
+        self.assertEqual(core.autonomy(), "ask")
+
+    def test_override_beats_plugin_option(self):
+        with mock.patch.dict(os.environ, {"CLAUDE_PLUGIN_OPTION_AUTONOMY": "auto"}):
+            self.assertEqual(core.autonomy(), "auto")
+            core.set_autonomy("off")
+            self.assertEqual(core.autonomy(), "off")
+            core.set_autonomy("default")
+            self.assertEqual(core.autonomy(), "auto")
+        with self.assertRaises(core.OcError):
+            core.set_autonomy("sometimes")
+
+    def test_ask_always_shows_the_dialog(self):
+        self.assertEqual(self.gate("ask", "write tests for the cart"), "ask")
+        self.assertEqual(self.gate("ask", "mach das mit OpenCode"), "ask")
+
+    def test_off_refuses_unless_the_user_asked_then_still_confirms(self):
+        self.assertEqual(self.gate("off", "write tests for the cart"), "deny")
+        self.assertEqual(self.gate("off", "gib das an OpenCode"), "ask")
+        self.assertEqual(self.gate("off", "and now the docs"), "deny")  # only the LATEST prompt counts
+
+    def test_request_belongs_to_its_own_session(self):
+        core.set_autonomy("off")
+        hooks.record_prompt("mach das mit OpenCode")
+        with mock.patch.object(core, "claude_pid", return_value=778):
+            self.assertEqual(hooks.delegate_gate("x")["hookSpecificOutput"]["permissionDecision"], "deny")
+
+    def test_mechanical_and_auto_pass(self):
+        self.assertIsNone(self.gate("mechanical", "x"))
+        self.assertIsNone(self.gate("auto", "x"))
+
+    def test_dialog_shows_what_is_delegated(self):
+        s = hooks._task_summary({"slug": "t1", "title": "#1 Tests", "agent": "oc-fast", "task": "a " * 400})
+        self.assertIn("#1 Tests | agent oc-fast | task: a a", s)
+        self.assertTrue(s.endswith("…"))
+
+    def run_bash_hook(self, command):
+        with mock.patch.object(sys, "stdin", io.StringIO(json.dumps({"tool_input": {"command": command}}))), \
+                mock.patch.object(sys, "stdout", new_callable=io.StringIO) as out:
+            hooks.pre_bash()
+        return out.getvalue()
+
+    def test_cli_start_is_gated_too(self):
+        core.set_autonomy("ask")
+        hooks.record_prompt("x")
+        for cmd in ("oc start t1 task.md", "cd /r && oc start t1 -", "~/.local/state/oc-connect/bin/oc start t1 x"):
+            self.assertIn('"ask"', self.run_bash_hook(cmd), cmd)
+        for cmd in ("oc status", "echo doc start", "cargo start"):
+            self.assertEqual(self.run_bash_hook(cmd), "", cmd)
+
+    def test_instructions_follow_the_mode(self):
+        core.set_autonomy("off")
+        with mock.patch.object(core, "opencode_setup",
+                               return_value={"agents": {}, "profile": "isolated", "oh_my_opencode": False}):
+            self.assertIn("WHEN TO DELEGATE (off)", mcp.instructions())
+
 
 if __name__ == "__main__":
     unittest.main()

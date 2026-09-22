@@ -32,6 +32,16 @@
             "timeout": 30
           }
         ]
+      },
+      {
+        "matcher": "mcp__plugin_oc_opencode__delegate",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/bin/oc hook pre-delegate",
+            "timeout": 10
+          }
+        ]
       }
     ]
   }
