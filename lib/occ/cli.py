@@ -136,6 +136,10 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("board-tab", help="open the live board in a new tab")
     sub.add_parser("mcp", help="run the MCP server on stdio (used by Claude Code)")
     sub.add_parser("monitor", help="print one line per job event (used by Claude Code)")
+    s = sub.add_parser("reap", help="stop a worker once Claude no longer uses it (runs in its tab)")
+    s.add_argument("slug")
+    s.add_argument("pid", type=int)
+    s.add_argument("idle_seconds", type=float, help="0 = only close when the Claude session ended")
     s = sub.add_parser("statusline", help="status line rows for jobs")
     s.add_argument("--base", help="command whose output goes above the job rows")
     s = sub.add_parser("install-statusline", help="add job rows under your existing Claude Code status line")
@@ -195,6 +199,9 @@ def main(argv=None) -> int:
         elif args.cmd == "monitor":
             from . import monitor
             monitor.main()
+        elif args.cmd == "reap":
+            from . import reaper
+            reaper.main(args.slug, args.pid, args.idle_seconds)
         elif args.cmd == "statusline":
             from . import statusline
             statusline.main(args.base)

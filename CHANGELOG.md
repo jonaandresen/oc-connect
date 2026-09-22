@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.0
+
+- Worker tabs close once Claude no longer uses them. Every tab starts a small reaper beside OpenCode. It stops the worker when the job has been idle (finished or failed, nothing pending) for `OC_IDLE_CLOSE_MIN` minutes (default 20, `0` = off), or when the Claude session that owns the job has ended and no other session adopted it within two minutes. A busy worker or one waiting for an answer is never stopped. Worktree and session stay; `status` shows why a worker was closed.
+- `send` to a stopped worker reopens its tab in the same session instead of failing.
+- Dead worker tabs in Terminal.app now actually close. They were found by their "OC" title, but OpenCode sets its own title and resets it to "Terminal" when it exits (measured), so finished tabs piled up. oc-connect now records the window id of every tab it opens and closes only those, and only once no process runs in them - a user's idle shell tab is never touched.
+- `close` waits until OpenCode has exited (about 1.2 s after SIGTERM, measured) before closing the tab; the fixed 1 s wait lost that race and left the tab open.
+
 ## 0.6.0
 
 - Snapshots: the worker's result is recorded as a commit under `refs/oc/<slug>` before `report`, `send`, `review` and `done`. `restore` puts a snapshot back (the state before the restore is snapshotted first, the recorded review is dropped), `snapshots` lists them. Found in real use: a single `git checkout --` during a review destroyed a finished result that nothing could reproduce. Snapshots survive `done --force`, so a removed worktree can still be recovered from the repository.

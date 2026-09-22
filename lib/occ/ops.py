@@ -123,6 +123,8 @@ def _worker_command(job: Dict[str, Any], session: Optional[str], install: bool) 
     Installing in the tab keeps ``delegate`` fast and lets the human watch it.
     ``exec`` so that closing the tab ends the worker and ending the worker
     closes the tab. ``--port`` makes the TUI process itself the HTTP server.
+    A reaper runs beside it (``$$`` becomes OpenCode's PID after ``exec``) and
+    stops the worker once Claude no longer uses it - see ``reaper``.
 
     ``--agent`` only for the worker profile's own agents: the TUI accepts only
     PRIMARY agents, and oh-my-opencode's ``fixer`` is a subagent -
@@ -135,6 +137,9 @@ def _worker_command(job: Dict[str, Any], session: Optional[str], install: bool) 
             where = shlex.quote(os.path.join(job["dir"], rel))
             steps.append(f"echo '== oc-connect: {cmd} in {rel}'; (cd {where} && {cmd}) "
                          f"|| echo '== oc-connect: INSTALL FAILED in {rel}'")
+    from . import reaper  # the tab's shell does not inherit Claude's environment: pass the limit along
+    oc = shlex.quote(os.path.join(PLUGIN_ROOT, "bin", "oc"))
+    steps.append(f"({oc} reap {shlex.quote(job['slug'])} $$ {reaper.idle_close_s():.0f} </dev/null >/dev/null 2>&1 &)")
     env = " ".join(f"{k}={shlex.quote(v)}" for k, v in worker_env().items())
     run = f"exec env {env} opencode --port {job['port']}" + (f" -s {shlex.quote(session)}" if session else "")
     if profile.mode() == "isolated" and job.get("agent") in profile.AGENTS:
@@ -284,14 +289,19 @@ def send(slug: str, text: str) -> str:
     """Follow-up message (a correction) into the same session."""
     job = core.load_job(slug)
     w = core.worker_of(job)
-    if not w.alive():
-        raise OcError(f"worker {slug} is not running - open it first (`open`)")
+    reopened = ""
+    if not w.alive():  # closed by hand or by the reaper: same session, fresh tab
+        open_(slug)
+        if not _wait_alive(w, 60):
+            raise OcError(f"worker {slug} was stopped and did not come back up - look at its tab")
+        reopened = " (worker was stopped - reopened its tab in the same session)"
+        job = core.load_job(slug)  # open_ changed the job file
     snapshot(slug, f"oc snapshot {slug}: before a follow-up message")  # a correction can make it worse
     w.prompt(job["session"], text, job.get("agent"), job.get("model"))
     job["sent_at"] = time.time()
     job.pop("review", None)  # new work, new review
     core.save_job(job)
-    return f"sent to {slug}"
+    return f"sent to {slug}{reopened}"
 
 
 # --------------------------------------------------------------------------- status / wait
@@ -590,6 +600,7 @@ def open_(slug: str) -> str:
     job = core.load_job(slug)
     if core.worker_of(job).alive():
         return f"worker {slug} is running (port {job['port']}) - its tab is open"
+    _set(slug, closed_reason=None)
     return terminal.open_tab(f"{terminal.TITLE_PREFIX} {slug}", _worker_command(job, job.get("session"), False),
                              cwd=job["dir"])
 
@@ -600,7 +611,11 @@ def _listener_pids(port: int) -> List[int]:
 
 
 def close(slug: str) -> str:
-    """Stop the worker. Its tab closes because the tab ``exec``-ed it."""
+    """Stop the worker, then close its finished tab.
+
+    OpenCode needs about 1.2 s to exit after SIGTERM (measured); a tab that
+    still holds the process is not closed, so wait for it to be gone.
+    """
     job = core.load_job(slug)
     pids = _listener_pids(int(job["port"]))
     if not pids:
@@ -610,7 +625,10 @@ def close(slug: str) -> str:
             os.kill(pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
-    time.sleep(1)
+    end = time.time() + 10
+    while time.time() < end and any(core.pid_alive(p) for p in pids):
+        time.sleep(0.2)
+    time.sleep(0.3)  # the tab notices its process is gone
     terminal.close_dead_tabs()
     return f"worker {slug} stopped (port {job['port']})"
 

@@ -459,7 +459,7 @@ def job_status(job: Dict[str, Any], detail: bool = False) -> Dict[str, Any]:
                           "agent": job.get("agent"), "dir": job.get("dir"), "branch": job.get("branch"),
                           "pr": job.get("pr"), "pending": [], "created": job.get("created"),
                           "owner": owner, "owner_alive": pid_alive(owner) if owner else False,
-                          "reviewed": bool(job.get("review"))}
+                          "reviewed": bool(job.get("review")), "closed": job.get("closed_reason")}
     if job.get("start_error"):
         st["state"], st["error"] = "failed", job["start_error"]
         return st

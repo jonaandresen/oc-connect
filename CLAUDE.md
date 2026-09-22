@@ -36,7 +36,11 @@ Rules for changes:
 - AppleScript lists every tab as its own window with one tab. A new tab is a new window id; "count of tabs" never grows.
 - Cmd-T via System Events was silently dropped in some runs; clicking Shell menu → New Tab (by position: menu 3, item 2, first entry) worked. Writing into "the selected tab of the front window" after a failed attempt put the worker command into the tab running Claude Code - never do that; only write into a window id that did not exist before and runs nothing.
 - `before` is a reserved word in AppleScript; a variable of that name makes the whole script fail.
-- Finished tabs stay open and keep their tty name; the next tab can reuse it, and trackers jumped into the dead one. `close_dead_tabs()` closes finished "OC …" tabs.
+- Finished tabs stay open and keep their tty name; the next tab can reuse it, and trackers jumped into the dead one. `close_dead_tabs()` closes them.
+- OpenCode sets its own tab title ("OC | <session title>") and resets it to "Terminal" when it exits (measured 2026-09-22). Finding dead tabs by the "OC" title therefore failed; they are tracked by window id (`terminal-windows` in the state dir), and a tab is closed only when `count of processes` is 0 (an idle shell has processes, so user tabs are safe).
+- OpenCode needs about 1.2 s to exit after SIGTERM; until then the tab still holds it and cannot be closed.
+- The tab's login shell does NOT inherit Claude Code's environment. Anything the tab needs from it (e.g. `OC_IDLE_CLOSE_MIN`) goes into the command line.
+- A background process started in the tab keeps the tab busy unless it leaves the tty session: the reaper calls `setsid()` (its tty shows as `??`).
 
 **Claude Code**
 - Plugin `monitors` run for the session and deliver each stdout line as a notification (verified live). A process started with `( … &)` is re-parented to PID 1, so `claude_pid()` finds no owner - test the monitor with `run_in_background`, not with a detached subshell.
@@ -45,7 +49,7 @@ Rules for changes:
 - Plugin `bin/` is on the Bash PATH; `${CLAUDE_PLUGIN_ROOT}` changes with every version, so settings that must survive updates point to the shim `~/.local/state/oc-connect/bin/oc`, rewritten at every SessionStart.
 - A plugin's `.mcp.json` is ALSO read as project config when you work in the plugin's own checkout, and `${CLAUDE_PLUGIN_ROOT}` is empty there: `ENOENT ... /bin/oc`, a second server named `opencode` stuck on "Pending approval". Since 0.6.0 the config lives in `plugin.json` (`mcpServers`, inline object - a path or `.mcp.json` also work).
 
-## Verification status (2026-09-20, version 0.6.0)
+## Verification status (2026-09-22, version 0.7.0)
 
 Verified end to end, in a real Claude Code session with the installed plugin:
 - MCP tools and instructions load; `answer` via MCP reached the worker; a wrong question id is refused.
@@ -62,11 +66,14 @@ Three real jobs in a scratch repo (2026-09-20, `oc-fast` on `opencode-go/deepsee
 - Snapshot probe: `report` snapshotted the result, `git checkout --` destroyed it, `restore` brought it back; after `done --force` the state was still readable from `refs/oc/snaptest`.
 Timings: `delegate` to task sent 17 s (about 1.5 s of it the short-lived server for the session), small job finished after 65 s, job with a question about 100 s. `oc status` 6-26 ms, status line 50-90 ms per redraw - the poll loop is not a cost factor.
 
-Unit tests: 51, green on Python 3.14 and 3.9.
+Reaper (2026-09-22, scratch repo, `oc-fast` on `opencode-go/deepseek-v4.1-flash`): with `OC_IDLE_CLOSE_MIN=1` an idle worker was stopped after ~75 s and its tab closed; the reason showed in `status`. `send` to the stopped worker reopened the tab in the same session and the worker answered. The owner-ended path is covered by unit tests only - while a session runs, its monitor adopts orphaned jobs, so it cannot be provoked live from inside one.
+Vibe Island: clicking the job's session brought its OpenCode terminal to the front (confirmed by the user, 2026-09-22). In that run the worker opened as its own window, not as a tab of Claude's window.
+
+Unit tests: 64, green on Python 3.14 and 3.9.
 
 ## Open
 
-1. **Vibe Island click → tab.** The session shows up; whether a click jumps into its tab is not confirmed.
+1. **Tab or window.** The worker opened as a separate window in the last live run although `_terminal_app_tab` prefers a tab via the Shell menu. Which one is better for watching, and whether the menu click works on this machine, is undecided.
 2. **Status line rows** (`▶ slug …` under the Open Island line) have not been confirmed on screen in a live session.
 3. **Quality of the worker profile.** Three real tasks were clean (see above): test-first, honest defeat test, no scope creep, an open decision asked instead of guessed. Still open: a task in a real project with real history, and a comparison with oh-my-opencode's orchestrator.
 4. **Terminals other than Terminal.app** (iTerm2, WezTerm, kitty, tmux) are implemented but untested.

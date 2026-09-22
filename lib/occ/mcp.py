@@ -114,7 +114,8 @@ TOOLS: Dict[str, Dict[str, Any]] = {
         "annotations": {"readOnlyHint": True},
     },
     "send": {
-        "description": "Send a follow-up message (e.g. review findings to fix) into the job's session.",
+        "description": "Send a follow-up message (e.g. review findings to fix) into the job's session. "
+                       "A stopped worker (closed by hand or when idle) is reopened in the same session first.",
         "inputSchema": {"type": "object", "required": ["slug", "message"], "properties": {
             "slug": _slug_schema(), "message": {"type": "string"}}},
     },
@@ -221,6 +222,8 @@ def _job_lines(r: Dict[str, Any], me: Any) -> str:
         lines.append(f"  last: {r['activity']}")
     if r.get("error"):
         lines.append(f"  ERROR: {r['error']}")
+    if r.get("closed") and r["state"] == "stopped":
+        lines.append(f"  closed automatically: {r['closed']} (`send` or `open` restarts it)")
     for p in r.get("pending", []):
         opts = f" [options: {' | '.join(p.get('options') or [])}]" if p.get("options") else ""
         lines.append(f"  {p['kind'].upper()} [{p['id']}]: {p['text']}{opts}")

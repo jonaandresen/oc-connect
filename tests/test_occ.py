@@ -22,7 +22,7 @@ sys.path.insert(0, os.path.join(ROOT, "lib"))
 TMP_STATE = tempfile.mkdtemp(prefix="oc-test-state-")
 os.environ["OC_STATE"] = TMP_STATE
 
-from occ import core, hooks, mcp, monitor, ops, profile, statusline  # noqa: E402
+from occ import core, hooks, mcp, monitor, ops, profile, reaper, statusline, terminal  # noqa: E402
 
 
 class FakeOpenCode(BaseHTTPRequestHandler):
@@ -577,15 +577,132 @@ class WorkerProfile(unittest.TestCase):
     def test_worker_env_and_command_use_the_profile(self):
         env = ops.worker_env()
         self.assertEqual(env["XDG_CONFIG_HOME"], self.home)
-        cmd = ops._worker_command({"dir": "/w", "port": 4101, "agent": "oc-fast"}, "ses_1", False)
+        cmd = ops._worker_command({"slug": "s1", "dir": "/w", "port": 4101, "agent": "oc-fast"}, "ses_1", False)
         self.assertIn("--agent oc-fast", cmd)
-        cmd = ops._worker_command({"dir": "/w", "port": 4101, "agent": "fixer"}, "ses_1", False)
+        cmd = ops._worker_command({"slug": "s1", "dir": "/w", "port": 4101, "agent": "fixer"}, "ses_1", False)
         self.assertNotIn("--agent", cmd)  # subagents cannot be TUI agents
 
     def test_inherit_mode_leaves_the_user_config_alone(self):
         with mock.patch.dict(os.environ, {"OC_PROFILE": "inherit"}):
             self.assertNotIn("XDG_CONFIG_HOME", ops.worker_env())
             self.assertNotEqual(core.default_agent(False), "oc-fast")
+
+
+class Reaper(unittest.TestCase):
+    """The worker tab closes once Claude no longer uses it - never mid-work."""
+    LIMIT = 20 * 60
+
+    def run_polls(self, states, owner_alive, step=15):
+        c, reason = reaper.Clock(), None
+        for i, state in enumerate(states):
+            reason = reaper.decide(c, {"state": state, "owner": 42, "owner_alive": owner_alive}, 1000 + i * step,
+                                   self.LIMIT)
+            if reason:
+                return i, reason
+        return None, None
+
+    def test_idle_job_of_a_live_session_closes_after_the_limit(self):
+        i, reason = self.run_polls(["done"] * 200, owner_alive=True)
+        self.assertEqual(i, self.LIMIT // 15)
+        self.assertIn("idle", reason)
+
+    def test_activity_resets_the_idle_clock(self):
+        polls = ["done"] * 70 + ["running"] + ["done"] * 70
+        self.assertEqual(self.run_polls(polls, owner_alive=True), (None, None))
+
+    def test_ended_session_closes_an_idle_job_after_the_grace(self):
+        i, reason = self.run_polls(["done"] * 20, owner_alive=False)
+        self.assertEqual(i, reaper.OWNER_GRACE_S // 15)
+        self.assertIn("ended", reason)
+
+    def test_busy_or_asking_worker_is_never_stopped(self):
+        for state in ("running", "waiting", "starting"):
+            self.assertEqual(self.run_polls([state] * 400, owner_alive=False), (None, None), state)
+
+    def test_orphan_that_finishes_later_closes_after_the_grace(self):
+        i, _ = self.run_polls(["running"] * 20 + ["done"] * 20, owner_alive=False)
+        self.assertEqual(i, 20)  # orphaned long ago; closes as soon as it is idle
+
+    def test_job_without_owner_only_uses_the_idle_limit(self):
+        c = reaper.Clock()
+        for t in range(0, 600, 15):
+            self.assertIsNone(reaper.decide(c, {"state": "done", "owner": None, "owner_alive": False}, t, self.LIMIT))
+
+    def test_idle_limit_zero_disables_it(self):
+        c = reaper.Clock()
+        for t in range(0, 100000, 600):
+            self.assertIsNone(reaper.decide(c, {"state": "done", "owner": 42, "owner_alive": True}, t, 0))
+        with mock.patch.dict(os.environ, {"OC_IDLE_CLOSE_MIN": "0"}):
+            self.assertEqual(reaper.idle_close_s(), 0)
+
+    def test_tab_starts_the_reaper_on_the_worker_pid(self):
+        with mock.patch.dict(os.environ, {"OC_IDLE_CLOSE_MIN": "3"}):
+            cmd = ops._worker_command({"slug": "s1", "dir": "/w", "port": 4101, "agent": "oc-fast"}, "ses_1", False)
+        reap, _, run = cmd.rpartition("; ")
+        self.assertIn("/bin/oc reap s1 $$ 180 ", reap)  # the limit travels with the command
+        self.assertTrue(reap.endswith("&)"))  # in the background, before exec
+        self.assertTrue(run.startswith("exec "))
+
+    def test_send_reopens_a_closed_worker(self):
+        srv = start_fake()
+        self.addCleanup(srv.server_close)
+        self.addCleanup(srv.shutdown)
+        d = tempfile.mkdtemp()
+        subprocess.run(["git", "init", "-q", d], check=True)
+        core.save_job({"slug": "r1", "dir": d, "port": srv.server_port, "session": "ses_1", "agent": "fixer",
+                       "created": time.time(), "closed_reason": "idle for 20 min"})
+        self.addCleanup(core.delete_job, "r1")
+        FakeOpenCode.replies = []
+        with mock.patch.object(core.Worker, "alive", return_value=False), \
+                mock.patch.object(ops, "_wait_alive", return_value=True), \
+                mock.patch.object(ops.terminal, "open_tab", return_value="tab") as tab:
+            out = ops.send("r1", "fix it")
+        tab.assert_called_once()
+        self.assertIn("reopened", out)
+        self.assertNotIn("closed_reason", core.load_job("r1"))
+        self.assertTrue(any(p.endswith("/ses_1/message") or "ses_1" in p for p, _ in FakeOpenCode.replies))
+
+    def test_close_waits_for_the_worker_before_closing_its_tab(self):
+        core.save_job({"slug": "c1", "dir": "/w", "port": 4101, "created": time.time()})
+        self.addCleanup(core.delete_job, "c1")
+        alive = [True] * 8 + [False] * 100  # OpenCode takes a while to exit
+        seen = []
+        with mock.patch.object(ops, "_listener_pids", return_value=[4242]), \
+                mock.patch.object(ops.os, "kill"), \
+                mock.patch.object(ops.time, "sleep"), \
+                mock.patch.object(core, "pid_alive", side_effect=lambda p: alive.pop(0)), \
+                mock.patch.object(ops.terminal, "close_dead_tabs",
+                                  side_effect=lambda: seen.append(len(alive))) as cdt:
+            ops.close("c1")
+        cdt.assert_called_once()
+        self.assertEqual(seen, [99])  # called only after the process was gone
+
+
+class DeadTabs(unittest.TestCase):
+    """Worker tabs are found by window id, and only tabs without a process close."""
+
+    def setUp(self):
+        self.addCleanup(lambda: os.path.exists(terminal.WINDOWS_FILE) and os.remove(terminal.WINDOWS_FILE))
+
+    def test_opened_window_is_remembered(self):
+        terminal.remember_window("tab 123")
+        terminal.remember_window("window 456")
+        terminal.remember_window("")  # nothing opened
+        self.assertEqual(terminal._our_windows(), [123, 456])
+
+    def test_script_closes_only_tabs_without_process(self):
+        script = terminal.close_dead_script([123, 456])
+        self.assertIn("set ours to {123, 456}", script)
+        self.assertIn("(count of (processes of t)) is 0 and", script)
+
+    def test_windows_that_are_gone_are_forgotten(self):
+        terminal._save_windows([123, 456])
+        done = subprocess.CompletedProcess([], 0, stdout="456 789 \n", stderr="")
+        with mock.patch.dict(os.environ, {"TERM_PROGRAM": "Apple_Terminal", "OC_TERMINAL": ""}), \
+                mock.patch.object(terminal.shutil, "which", return_value="/usr/bin/osascript"), \
+                mock.patch.object(terminal.subprocess, "run", return_value=done):
+            terminal.close_dead_tabs()
+        self.assertEqual(terminal._our_windows(), [456])
 
 
 if __name__ == "__main__":
