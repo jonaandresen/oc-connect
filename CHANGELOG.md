@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.8.1
+
+- OpenCode 2 is detected and refused with a clear message (`setup` warns, `delegate`, `oc start` and `selftest` stop) instead of failing with `HTTP Error 405`. OpenCode 2 moved its server API to `/api/...` behind a password (measured on 2.0.29). Support for it is planned for the next release.
+- `selftest` names the provider error (for example an expired API key) instead of reporting that the model skipped the command.
+- `oc --version` and the MCP server reported 0.6.0; they now report the plugin version, and a test keeps both in sync.
+
 ## 0.8.0
 
 - You decide whether work goes to OpenCode. New default mode `ask`: every delegation brings up Claude Code's confirmation dialog with title, agent and task. `off` refuses unless your latest message asked for OpenCode, and then asks too. The gate is a PreToolUse hook on `delegate` and on `oc start` in Bash, so it does not depend on the model following instructions; a hook's "ask" shows the dialog even under `--dangerously-skip-permissions` (measured).

@@ -30,7 +30,14 @@ Rules for changes:
 - In a config without the user's `permission` block the `question` tool is off - the worker said it had none. The profile allows it explicitly.
 - A session created by one server process is visible to another on the same machine (sessions are on disk). That is how the tab can start with `-s <session>`.
 - `/tui/select-session` right after the port answers is unreliable - the TUI is not listening yet and the tab stayed on the start screen.
+- A provider error ends the turn without parts: `POST /session/<id>/message` returns `info.error = {name: "APIError", data: {message, statusCode}}` (measured 1.19.4, expired key). `ops.turn_error()` reads it.
 - A flat-rate provider (OpenCode Go) DOES report a cost per message: $0.01 for a small job on `deepseek-v4.1-flash` (measured 2026-09-20). The earlier claim of cost 0 was wrong. What the number is worth is another question - a subscription does not charge per message.
+
+**OpenCode 2 (measured 2.0.29, 2026-10-24) - not supported yet**
+- `opencode.ai/install` still installs 1.x (1.19.4 on 2026-10-24); 2.x comes from `opencode.ai/v2/install` / npm `@opencode/cli-<platform>`.
+- `opencode serve` prints a password; the API needs HTTP basic auth (user `opencode`), routes live under `/api/...`, the OpenAPI spec is `/openapi.json` ("Experimental HttpApi", 0.0.1). `POST /session` (v1 path) answers 405.
+- Changed for us: prompt is `POST /api/session/<id>/prompt`; questions are "forms" (`/api/session/<id>/form/<id>/reply`); permissions `/api/session/<id>/permission/...`; TUI flags are `--server`/`--standalone`/`--session` (no `--port`), a background service is the default; config keys are `plugins`, `providers`, `agents` and `permissions` as a list.
+- Not yet re-measured on 2.x: worker profile via `XDG_CONFIG_HOME`, guard matching, tab-per-job and Vibe Island tracking.
 
 **Terminal.app**
 - AppleScript lists every tab as its own window with one tab. A new tab is a new window id; "count of tabs" never grows.
@@ -52,7 +59,7 @@ Rules for changes:
 - Plugin `userConfig` reaches hooks as `CLAUDE_PLUGIN_OPTION_<KEY>` and the MCP server via `${user_config.KEY}` in `plugin.json` env (the latter measured; the hook variable is from the docs and not yet seen live). Shell-form hook commands reject `${user_config.*}`.
 - A plugin's `.mcp.json` is ALSO read as project config when you work in the plugin's own checkout, and `${CLAUDE_PLUGIN_ROOT}` is empty there: `ENOENT ... /bin/oc`, a second server named `opencode` stuck on "Pending approval". Since 0.6.0 the config lives in `plugin.json` (`mcpServers`, inline object - a path or `.mcp.json` also work).
 
-## Verification status (2026-09-22, version 0.8.0)
+## Verification status (2026-09-22, version 0.8.0; 0.8.1 changes checked 2026-10-24)
 
 Verified end to end, in a real Claude Code session with the installed plugin:
 - MCP tools and instructions load; `answer` via MCP reached the worker; a wrong question id is refused.
@@ -74,7 +81,9 @@ Vibe Island: clicking the job's session brought its OpenCode terminal to the fro
 
 Not yet seen live with the installed plugin (needs a restart): the delegate gate from the plugin's own `hooks.json`, `CLAUDE_PLUGIN_OPTION_AUTONOMY` in the hook, `/oc:mode`.
 
-Unit tests: 74, green on Python 3.14 and 3.9.
+0.8.1 (2026-10-24): install from the marketplace into an empty Claude Code config (2.1.307) loaded 7 skills, 3 hooks and the MCP server; MCP `initialize`/`tools/list` answered; `oc setup` on 2.0.29 warns; `selftest` on 1.19.4 showed the provider error (expired key). A full selftest with a working key is still due for 0.8.1.
+
+Unit tests: 78, green on Python 3.14 and 3.9.
 
 ## Open
 
@@ -83,5 +92,5 @@ Unit tests: 74, green on Python 3.14 and 3.9.
 3. **Quality of the worker profile.** Three real tasks were clean (see above): test-first, honest defeat test, no scope creep, an open decision asked instead of guessed. Still open: a task in a real project with real history, and a comparison with oh-my-opencode's orchestrator.
 4. **Terminals other than Terminal.app** (iTerm2, WezTerm, kitty, tmux) are implemented but untested.
 5. **Agent panel row.** Would need a subagent (a model call) and the plugin's `subagentStatusLine` did not run. Parked unless Claude Code offers rows for non-model tasks.
-6. **Before making the repo public:** switch the commit author e-mail to the GitHub noreply address; decide whether to port to TypeScript for the official MCP and OpenCode SDKs (the MCP protocol and the OpenCode API are hand-rolled here).
+6. **OpenCode 2 support** (next release, on `main`; 0.8.x for OpenCode 1 stays on the `opencode-1` branch). Port `core.Worker`, profile, guard, terminal launch and selftest to the 2.x API, then re-measure every OpenCode fact above. Decide then whether to use the official SDKs (TypeScript) instead of the hand-rolled API client.
 7. **Budget on flat-rate providers:** the cost per message is reported (see above), but it does not describe a subscription's real limit, and the provider quota is not readable.

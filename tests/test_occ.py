@@ -3,7 +3,7 @@
 A fake OpenCode server stands in for the real one, so the state machine
 (running / waiting / done / stopped) is tested without a model or a terminal.
 The end-to-end path against real OpenCode is covered by ``oc selftest`` and the
-manual check in CONTRIBUTING.md.
+manual checks in CLAUDE.md.
 """
 import io
 import json
@@ -794,6 +794,33 @@ class DelegationControl(unittest.TestCase):
         with mock.patch.object(core, "opencode_setup",
                                return_value={"agents": {}, "profile": "isolated", "oh_my_opencode": False}):
             self.assertIn("WHEN TO DELEGATE (off)", mcp.instructions())
+
+
+class Release(unittest.TestCase):
+    def test_version_matches_plugin_manifest(self):
+        with open(os.path.join(ROOT, ".claude-plugin", "plugin.json")) as fh:
+            self.assertEqual(core.VERSION, json.load(fh)["version"])
+
+    def test_opencode_major(self):
+        self.assertEqual(core.opencode_major("1.19.4"), 1)
+        self.assertEqual(core.opencode_major("opencode v2.0.29"), 2)
+        self.assertIsNone(core.opencode_major(None))
+
+    def test_opencode_2_is_refused_with_a_clear_message(self):
+        with mock.patch.object(core, "_opencode_version", return_value="opencode v2.0.29"):
+            with self.assertRaises(core.OcError) as ctx:
+                core.require_opencode_1()
+        self.assertIn("needs OpenCode 1.x", str(ctx.exception))
+        for v in ("1.19.4", None):
+            with mock.patch.object(core, "_opencode_version", return_value=v):
+                core.require_opencode_1()
+
+    def test_selftest_names_the_provider_error(self):
+        res = {"info": {"error": {"name": "APIError", "data": {"message": "This API key has expired.",
+                                                                "statusCode": 401}}}, "parts": []}
+        self.assertEqual(ops.turn_error(res), "APIError: This API key has expired.")
+        self.assertIsNone(ops.turn_error({"info": {"role": "assistant"}, "parts": []}))
+        self.assertIsNone(ops.turn_error(True))
 
 
 if __name__ == "__main__":

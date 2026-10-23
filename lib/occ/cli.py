@@ -53,6 +53,8 @@ def cmd_status(args: argparse.Namespace) -> int:
 def cmd_setup(_: argparse.Namespace) -> int:
     s = core.opencode_setup()
     print(f"opencode: {s['opencode'] or 'NOT FOUND'} {s['version'] or ''}".rstrip())
+    if (core.opencode_major(s["version"]) or 0) >= 2:
+        print("WARNING: " + core.OPENCODE_2_UNSUPPORTED.format(version=s["version"]))
     print(f"plugins: {', '.join(s['plugins']) or 'none'}")
     print(f"oh-my-opencode: {'yes' if s['oh_my_opencode'] else 'no (optional)'}"
           f"   superpowers: {'yes' if s['superpowers'] else 'no'}")

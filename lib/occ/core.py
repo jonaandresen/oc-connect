@@ -22,7 +22,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional
 
-VERSION = "0.6.0"
+VERSION = "0.8.1"  # keep equal to .claude-plugin/plugin.json (a test checks it)
 
 STATE_DIR = os.environ.get("OC_STATE") or os.path.expanduser("~/.local/state/oc-connect")
 JOBS_DIR = os.path.join(STATE_DIR, "jobs")
@@ -624,6 +624,28 @@ def _which(cmd: str) -> Optional[str]:
         if os.path.isfile(p) and os.access(p, os.X_OK):
             return p
     return None
+
+
+def opencode_major(version: Optional[str]) -> Optional[int]:
+    """``1.19.4`` -> 1, ``opencode v2.0.29`` -> 2, unknown -> None."""
+    m = re.search(r"(\d+)\.\d+", version or "")
+    return int(m.group(1)) if m else None
+
+
+OPENCODE_2_UNSUPPORTED = ("This OpenCode ({version}) is not supported yet - oc-connect needs OpenCode 1.x "
+                          "(OpenCode 2 has a new server API). The 1.x installer: "
+                          "https://opencode.ai/install")
+
+
+def require_opencode_1() -> None:
+    """Refuse OpenCode 2 with a clear message instead of an HTTP error.
+
+    Measured on 2.0.29: the server moved to ``/api/...`` behind a password,
+    so the first call (``POST /session``) fails with 405.
+    """
+    version = _opencode_version()
+    if (opencode_major(version) or 0) >= 2:
+        raise OcError(OPENCODE_2_UNSUPPORTED.format(version=version))
 
 
 def _opencode_version() -> Optional[str]:

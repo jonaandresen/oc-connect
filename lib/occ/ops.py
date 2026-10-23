@@ -185,6 +185,7 @@ def start(slug: str, task: str, title: Optional[str] = None, branch: Optional[st
         raise OcError("empty task")
     if not shutil.which("opencode"):
         raise OcError("`opencode` not found on PATH - install it from https://opencode.ai")
+    core.require_opencode_1()
     if os.path.exists(core.job_path(slug)):
         raise OcError(f"job {slug} exists already - pick another slug or finish it with `done`")
     repo = os.path.abspath(repo) if repo else core.repo_root(cwd)
@@ -687,6 +688,21 @@ SELFTEST_COMMANDS = [
 ]
 
 
+def turn_error(res: Any) -> Optional[str]:
+    """The provider error of a finished turn, e.g. an expired API key, or None.
+
+    Without this the selftest blamed the model ("skipped it") when the provider
+    had refused the call (measured on 1.19.4: ``info.error`` with
+    ``name: APIError`` and ``data.message``, no parts).
+    """
+    err = ((res or {}).get("info") or {}).get("error") if isinstance(res, dict) else None
+    if not err:
+        return None
+    msg = (err.get("data") or {}).get("message") if isinstance(err, dict) else None
+    name = err.get("name", "error") if isinstance(err, dict) else "error"
+    return f"{name}: {msg}" if msg else str(name)
+
+
 def selftest(model: Optional[str] = None) -> str:
     """Prove both guard layers in a throw-away repository.
 
@@ -694,6 +710,7 @@ def selftest(model: Optional[str] = None) -> str:
     remote must not contain any ``oc-selftest-*`` branch. The user's own
     repository is never touched, so a failing guard cannot push anywhere real.
     """
+    core.require_opencode_1()
     tmp = tempfile.mkdtemp(prefix="oc-selftest-")
     origin, repo = os.path.join(tmp, "origin.git"), os.path.join(tmp, "repo")
     subprocess.run(["git", "init", "-q", "--bare", origin], check=True)
@@ -722,7 +739,13 @@ def selftest(model: Optional[str] = None) -> str:
             if model:
                 prov, _, mid = model.partition("/")
                 body["model"] = {"providerID": prov, "modelID": mid}
-            w.request("POST", f"/session/{sid}/message", body, timeout=240)
+            res = w.request("POST", f"/session/{sid}/message", body, timeout=240)
+            failed = turn_error(res)
+            if failed:
+                w.request("DELETE", f"/session/{sid}", timeout=10)
+                skipped = True
+                lines.append(f"  NOT RUN                  {cmd}  ({failed})")
+                continue
             ran = [p for m in w.messages(sid, timeout=15) for p in m.get("parts", [])
                    if p.get("type") == "tool" and p.get("tool") == "bash"]
             w.request("DELETE", f"/session/{sid}", timeout=10)

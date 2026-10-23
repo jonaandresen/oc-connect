@@ -28,7 +28,7 @@ you ──► Claude Code (lead) ──task──► OpenCode worker (tab "OC 27
 ## Requirements
 
 - Claude Code ≥ 2.1.271
-- [OpenCode](https://opencode.ai) ≥ 1.18 with a configured provider
+- [OpenCode](https://opencode.ai) 1.x (≥ 1.18, tested up to 1.19.4) with a configured provider. **OpenCode 2 is not supported yet** - it has a new server API; `oc setup` warns and `delegate` refuses with a clear message. `curl -fsSL https://opencode.ai/install | bash` installs 1.x.
 - `python3` ≥ 3.9 (ships with macOS), `git`
 - A terminal that can open tabs: tmux (anywhere), WezTerm, kitty, iTerm2 or Terminal.app. **Terminal.app** needs *System Settings → Privacy & Security → Accessibility → Terminal*; without it workers open in windows.
 - Optional: [oh-my-opencode-slim](https://github.com/alvinunreal/oh-my-opencode-slim), [superpowers](https://github.com/obra/superpowers)
