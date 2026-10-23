@@ -822,6 +822,23 @@ class Release(unittest.TestCase):
         self.assertIsNone(ops.turn_error({"info": {"role": "assistant"}, "parts": []}))
         self.assertIsNone(ops.turn_error(True))
 
+    def test_selftest_shows_a_changed_command(self):
+        part = {"type": "tool", "tool": "bash", "state": {"status": "completed",
+                                                          "input": {"command": "cd /tmp/r && git push origin x"}}}
+        self.assertEqual(ops.ran_as(part, "git push origin x"), "  (ran as: cd /tmp/r && git push origin x)")
+        part["state"]["input"]["command"] = "git push origin x"
+        self.assertEqual(ops.ran_as(part, "git push origin x"), "")
+        self.assertEqual(ops.ran_as({"state": {}}, "git push origin x"), "")
+
+    def test_selftest_does_not_count_another_command_as_blocked(self):
+        def part(actual):
+            return {"state": {"input": {"command": actual}}}
+        cmd = 'bash -c "git push origin x"'
+        self.assertFalse(ops.ran_the_command(part("git remote -v; git status -sb"), cmd))
+        self.assertTrue(ops.ran_the_command(part(cmd), cmd))
+        self.assertTrue(ops.ran_the_command(part("cd /tmp/r && " + cmd), cmd))
+        self.assertTrue(ops.ran_the_command({"state": {}}, cmd))
+
 
 if __name__ == "__main__":
     unittest.main()

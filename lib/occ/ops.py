@@ -703,6 +703,30 @@ def turn_error(res: Any) -> Optional[str]:
     return f"{name}: {msg}" if msg else str(name)
 
 
+def ran_as(part: Dict[str, Any], cmd: str) -> str:
+    """`` (ran as: ...)`` when the model changed the command, else "".
+
+    The guard judges the command the model actually ran. Seen on 1.19.4: a
+    direct ``git push`` passed the guard in the selftest but was blocked when
+    run alone - without the real command the report could not tell why.
+    """
+    actual = ((part.get("state") or {}).get("input") or {}).get("command")
+    if not isinstance(actual, str) or actual.strip() == cmd.strip():
+        return ""
+    return f"  (ran as: {actual.strip()})"
+
+
+def ran_the_command(part: Dict[str, Any], cmd: str) -> bool:
+    """Did the model run the given command (possibly wrapped, e.g. ``cd x && cmd``)?
+
+    Seen on 1.19.4: asked for ``bash -c "git push ..."`` it ran ``git remote -v``.
+    The output showed the disabled push URL, and the selftest counted a push
+    that never happened as blocked. Unknown input (no ``command``) counts as run.
+    """
+    actual = ((part.get("state") or {}).get("input") or {}).get("command")
+    return not isinstance(actual, str) or cmd.strip() in actual
+
+
 def selftest(model: Optional[str] = None) -> str:
     """Prove both guard layers in a throw-away repository.
 
@@ -753,6 +777,10 @@ def selftest(model: Optional[str] = None) -> str:
                 skipped = True
                 lines.append(f"  NOT RUN                  {cmd}  (the model skipped it)")
                 continue
+            if not ran_the_command(ran[0], cmd):
+                skipped = True
+                lines.append(f"  NOT RUN                  {cmd}  (the model ran something else){ran_as(ran[0], cmd)}")
+                continue
             state = ran[0].get("state", {})
             out = str(state.get("output") or state.get("error") or "")
             if state.get("status") == "error":
@@ -764,7 +792,7 @@ def selftest(model: Optional[str] = None) -> str:
             else:
                 verdict = "ran"
                 ran_unblocked = ran_unblocked or i > 0
-            lines.append(f"  {verdict:<24} {cmd}")
+            lines.append(f"  {verdict:<24} {cmd}" + ran_as(ran[0], cmd))
     finally:
         proc.terminate()
     leaked = subprocess.run(["git", "branch", "--list", "oc-selftest-*"], cwd=origin,

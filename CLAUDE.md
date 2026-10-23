@@ -30,6 +30,7 @@ Rules for changes:
 - In a config without the user's `permission` block the `question` tool is off - the worker said it had none. The profile allows it explicitly.
 - A session created by one server process is visible to another on the same machine (sessions are on disk). That is how the tab can start with `-s <session>`.
 - `/tui/select-session` right after the port answers is unreliable - the TUI is not listening yet and the tab stayed on the start screen.
+- Models do not always run the command they are asked for (1.19.4, `deepseek-v4.1-flash-free`): once `git remote -v; git status -sb` instead of `bash -c "git push ..."`, once a direct `git push` that passed the guard although `git push origin HEAD:refs/...` alone was blocked by it (measured twice, with and without `/`). The selftest therefore judges the command in the tool part's `state.input.command`.
 - A provider error ends the turn without parts: `POST /session/<id>/message` returns `info.error = {name: "APIError", data: {message, statusCode}}` (measured 1.19.4, expired key). `ops.turn_error()` reads it.
 - A flat-rate provider (OpenCode Go) DOES report a cost per message: $0.01 for a small job on `deepseek-v4.1-flash` (measured 2026-09-20). The earlier claim of cost 0 was wrong. What the number is worth is another question - a subscription does not charge per message.
 
@@ -81,9 +82,9 @@ Vibe Island: clicking the job's session brought its OpenCode terminal to the fro
 
 Not yet seen live with the installed plugin (needs a restart): the delegate gate from the plugin's own `hooks.json`, `CLAUDE_PLUGIN_OPTION_AUTONOMY` in the hook, `/oc:mode`.
 
-0.8.1 (2026-10-24): install from the marketplace into an empty Claude Code config (2.1.307) loaded 7 skills, 3 hooks and the MCP server; MCP `initialize`/`tools/list` answered; `oc setup` on 2.0.29 warns; `selftest` on 1.19.4 showed the provider error (expired key). A full selftest with a working key is still due for 0.8.1.
+0.8.1 (2026-10-24): install from the marketplace into an empty Claude Code config (2.1.307) loaded 7 skills, 3 hooks and the MCP server; MCP `initialize`/`tools/list` answered; `oc setup` on 2.0.29 warns; `selftest` on 1.19.4 showed the provider error (expired key); with `opencode/deepseek-v4.1-flash-free` (no account) all six commands ran exactly as given and were blocked - direct push and `docker ps` by the guard, the indirect forms by the environment - and nothing reached the remote.
 
-Unit tests: 78, green on Python 3.14 and 3.9.
+Unit tests: 80, green on Python 3.14 and 3.9.
 
 ## Open
 
