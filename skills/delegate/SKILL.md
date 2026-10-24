@@ -34,7 +34,7 @@ By default workers run with oc-connect's **own OpenCode profile**: none of the u
 | larger, several files, cross-cutting | `oc-strong` | from `orchestrator` |
 | UI and styling | `oc-ui` | from `designer` |
 
-The `setup` tool shows the models. With `OC_PROFILE=inherit` workers use the user's full OpenCode setup instead; then oh-my-opencode's `fixer`/`designer` work too (they are subagents - oc-connect sends the agent via the API, the tab cannot select them).
+The `setup` tool shows the models. With `OC_PROFILE=inherit` workers use the user's full OpenCode setup instead; then their agents (e.g. oh-my-opencode's) can be named per job - oc-connect sets the agent on the job's session.
 
 ## Workflow
 

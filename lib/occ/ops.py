@@ -13,6 +13,7 @@ says "commit and push when done". ``oc selftest`` proves both layers.
 from __future__ import annotations
 
 import os
+import secrets
 import shlex
 import shutil
 import signal
@@ -54,12 +55,35 @@ def guard_config() -> str:
     return GUARD_FILE
 
 
+V1_ACTIONS = {"bash": "shell", "task": "subagent"}  # 1.x permission names -> OpenCode 2 actions
+
+
+def guard_rules(path: Optional[str] = None) -> List[Dict[str, str]]:
+    """The guard as OpenCode 2 permission rules - the LAST matching rule wins (measured).
+
+    Reads the 2.x list (``permissions``) and still the 1.x object
+    (``permission``) that oc-connect 1.x wrote to the state dir.
+    """
+    cfg = core._load_jsonc(path or guard_config()) or {}
+    if isinstance(cfg.get("permissions"), list):
+        return [r for r in cfg["permissions"] if isinstance(r, dict) and {"action", "resource", "effect"} <= set(r)]
+    rules = []
+    for key, val in (cfg.get("permission") or {}).items():
+        action = V1_ACTIONS.get(key, key)
+        if isinstance(val, str):
+            rules.append({"action": action, "resource": "*", "effect": val})
+        elif isinstance(val, dict):
+            rules += [{"action": action, "resource": pat, "effect": eff} for pat, eff in val.items()]
+    return rules
+
+
 def worker_env() -> Dict[str, str]:
     """Environment of every worker - the second guard layer.
 
     The permission guard matches command strings, so ``bash -c "git push"``,
     ``command git push`` and ``/usr/bin/git push`` pass it (measured). These
-    settings act on the programs themselves, in every child process:
+    settings act on the programs themselves, in every child process of the
+    worker's server - its shell commands included (measured on 2.1.4):
 
     * ``remote.origin.pushurl`` and a catch-all ``pushInsteadOf`` rewrite every
       push URL, explicit ones included, to a path that does not exist. Fetch
@@ -67,9 +91,9 @@ def worker_env() -> Dict[str, str]:
     * ``DOCKER_HOST`` points to a socket that does not exist.
     * ``GIT_SSH_COMMAND=false`` stops git over ssh.
     """
-    env = {"OPENCODE_CONFIG": guard_config()}
+    env = {"OPENCODE_CONFIG": guard_config(), "OPENCODE_DISABLE_AUTOUPDATE": "1"}
     if profile.mode() == "isolated":
-        env["XDG_CONFIG_HOME"] = profile.ensure_home()
+        env["XDG_CONFIG_HOME"] = profile.ensure_home(guard_rules())
     base = int(os.environ.get("GIT_CONFIG_COUNT", "0") or 0)  # keep the user's own entries
     pairs = [("remote.origin.pushurl", PUSH_DISABLED), (f"url.{PUSH_DISABLED}/.pushInsteadOf", "")]
     for i, (key, value) in enumerate(pairs):
@@ -117,19 +141,18 @@ def _install_commands(wt: str) -> List[Tuple[str, str]]:
     return found
 
 
-def _worker_command(job: Dict[str, Any], session: Optional[str], install: bool) -> str:
-    """Shell command for the job's tab: install dependencies, then run OpenCode.
+def _worker_command(job: Dict[str, Any], install: bool) -> str:
+    """Shell command for the job's tab: install dependencies, then run the worker.
 
     Installing in the tab keeps ``delegate`` fast and lets the human watch it.
     ``exec`` so that closing the tab ends the worker and ending the worker
-    closes the tab. ``--port`` makes the TUI process itself the HTTP server.
-    A reaper runs beside it (``$$`` becomes OpenCode's PID after ``exec``) and
-    stops the worker once Claude no longer uses it - see ``reaper``.
+    closes the tab. The worker is ``oc tab`` (see ``tab_main``): OpenCode's
+    server plus the TUI attached to it. A reaper runs beside it (``$$`` becomes
+    that process after ``exec``) and stops the worker once Claude no longer
+    uses it - see ``reaper``.
 
-    ``--agent`` only for the worker profile's own agents: the TUI accepts only
-    PRIMARY agents, and oh-my-opencode's ``fixer`` is a subagent -
-    ``opencode --agent fixer`` fails. The HTTP API accepts both, so the agent
-    also goes with every prompt.
+    The tab's login shell does not inherit Claude's environment: what the
+    worker needs from it travels on the command line.
     """
     steps = []
     if install:
@@ -137,14 +160,81 @@ def _worker_command(job: Dict[str, Any], session: Optional[str], install: bool) 
             where = shlex.quote(os.path.join(job["dir"], rel))
             steps.append(f"echo '== oc-connect: {cmd} in {rel}'; (cd {where} && {cmd}) "
                          f"|| echo '== oc-connect: INSTALL FAILED in {rel}'")
-    from . import reaper  # the tab's shell does not inherit Claude's environment: pass the limit along
+    from . import reaper
     oc = shlex.quote(os.path.join(PLUGIN_ROOT, "bin", "oc"))
     steps.append(f"({oc} reap {shlex.quote(job['slug'])} $$ {reaper.idle_close_s():.0f} </dev/null >/dev/null 2>&1 &)")
-    env = " ".join(f"{k}={shlex.quote(v)}" for k, v in worker_env().items())
-    run = f"exec env {env} {shlex.quote(core.opencode_bin())} --port {job['port']}" + (f" -s {shlex.quote(session)}" if session else "")
-    if profile.mode() == "isolated" and job.get("agent") in profile.AGENTS:
-        run += f" --agent {shlex.quote(job['agent'])}"  # primary agents: the tab shows the right one
-    return "; ".join(steps + [run])
+    carry = {"OC_STATE": core.STATE_DIR, "OC_OPENCODE": core.opencode_bin(), "OC_PROFILE": profile.mode()}
+    env = " ".join(f"{k}={shlex.quote(v)}" for k, v in carry.items())
+    return "; ".join(steps + [f"exec env {env} {oc} tab {shlex.quote(job['slug'])}"])
+
+
+def _session_for(job: Dict[str, Any], w: core.Worker) -> str:
+    """Create the job's session: agent, model and the guard on the session itself.
+
+    Also checks the agent name, so a typo fails before the worker starts.
+    The model: ``OC_MODEL``/the job's, else the agent's from the worker profile
+    (OpenCode 2 drops agents that name a model in the config - see ``profile``).
+    """
+    names = w.agents()
+    if names and job["agent"] not in names:
+        raise OcError(f"OpenCode has no agent {job['agent']!r}. Available: {', '.join(names)}")
+    model = job.get("model")
+    if not model and profile.mode() == "isolated":
+        model = profile.agent_models().get(job["agent"])
+    return w.create_session(job["title"], job["agent"], model, guard_rules())
+
+
+def tab_main(slug: str) -> int:
+    """The worker, run in its tab: OpenCode's server on the job's port, the TUI on top.
+
+    OpenCode 2's TUI has no ``--port`` - it starts a private server or attaches
+    to one (``--server``). The job needs a server it can reach, so this process
+    runs ``opencode serve`` with the worker's environment and a password of
+    the job's, creates the session if there is none yet, and attaches the TUI
+    to it. Both stay children of this process in the tab's terminal (session
+    trackers walk up from OpenCode to the tab), and the server stops with the
+    TUI - or when the reaper or ``close`` signal this process.
+    """
+    job = core.load_job(slug)
+    env = dict(os.environ, **worker_env())
+    env["OPENCODE_SERVER_PASSWORD"] = job["password"]
+    os.makedirs(os.path.join(core.STATE_DIR, "logs"), exist_ok=True)
+    log = open(os.path.join(core.STATE_DIR, "logs", slug + ".log"), "a")
+    procs = [subprocess.Popen([core.opencode_bin(), "serve", "--port", str(job["port"])], cwd=job["dir"], env=env,
+                              stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)]
+    _set(slug, tab_pid=os.getpid())
+
+    def stop(*_: Any) -> None:
+        raise SystemExit(0)
+
+    for sig in (signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, stop)
+    try:
+        w = core.worker_of(job)
+        if not _wait_alive(w, 60):
+            raise OcError(f"OpenCode did not start on port {job['port']} - see {log.name}")
+        sid = job.get("session")
+        if not sid:
+            sid = _session_for(job, w)
+            _set(slug, session=sid)
+        procs.insert(0, subprocess.Popen([core.opencode_bin(), "--server", w.base, "--session", sid],
+                                         cwd=job["dir"], env=env))
+        signal.signal(signal.SIGINT, signal.SIG_IGN)  # Ctrl-C belongs to the TUI, not to its server
+        return procs[0].wait()
+    except OcError as exc:
+        _set(slug, start_error=str(exc))
+        print(f"oc-connect: {exc}")
+        time.sleep(5)
+        return 1
+    finally:
+        for proc in procs:
+            if proc.poll() is None:
+                proc.terminate()
+        for proc in procs:
+            try:
+                proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
 
 
 def _wait_alive(w: core.Worker, seconds: float) -> bool:
@@ -157,9 +247,8 @@ def _wait_alive(w: core.Worker, seconds: float) -> bool:
 
 
 def browser_url(job: Dict[str, Any]) -> str:
-    import base64
-    base = f"http://127.0.0.1:{job['port']}"
-    return f"{base}/server/{base64.b64encode(base.encode()).decode()}/session/{job.get('session', '')}"
+    """OpenCode's web UI of the job's server; the password is the job's own."""
+    return f"http://opencode:{job.get('password', '')}@127.0.0.1:{job['port']}/"
 
 
 def _untracked(repo: str, rel: str) -> bool:
@@ -186,7 +275,7 @@ def start(slug: str, task: str, title: Optional[str] = None, branch: Optional[st
     if not shutil.which(core.opencode_bin()):
         raise OcError(f"`{core.opencode_bin()}` not found - install OpenCode from https://opencode.ai "
                       "or point OC_OPENCODE to it")
-    core.require_opencode_1()
+    core.require_opencode_2()
     if os.path.exists(core.job_path(slug)):
         raise OcError(f"job {slug} exists already - pick another slug or finish it with `done`")
     repo = os.path.abspath(repo) if repo else core.repo_root(cwd)
@@ -219,7 +308,7 @@ def start(slug: str, task: str, title: Optional[str] = None, branch: Optional[st
 
     job = {"slug": slug, "title": title or slug, "branch": branch, "dir": wt, "repo": repo,
            "port": free_port(), "agent": agent, "model": model, "created": time.time(), "base": base,
-           "owner": core.claude_pid()}
+           "owner": core.claude_pid(), "password": secrets.token_urlsafe(18)}
     core.save_job(job)
 
     if background:
@@ -231,49 +320,23 @@ def start(slug: str, task: str, title: Optional[str] = None, branch: Optional[st
     return "\n".join(report)
 
 
-def _precreate_session(job: Dict[str, Any]) -> str:
-    """Create the job's session BEFORE its tab opens, via a short-lived server.
-
-    The tab then starts with ``-s <session>`` and shows the job right away.
-    Switching an already running TUI (``/tui/select-session``) is unreliable:
-    the port answers before the TUI listens, and the tab stayed on the start
-    screen. Sessions live on disk, so the tab's own server finds this one.
-    Also checks the agent name, so a typo fails before any tab opens.
-    """
-    port = free_port()
-    while port == job["port"]:
-        port += 1
-    proc = subprocess.Popen([core.opencode_bin(), "serve", "--port", str(port)], cwd=job["dir"],
-                            env=dict(os.environ, **worker_env()),
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    try:
-        w = core.Worker(port, job["dir"])
-        if not _wait_alive(w, 60):
-            raise OcError("could not start OpenCode to create the session")
-        names = [a.get("name") for a in (w.get("/agent", timeout=10) or [])]
-        if names and job["agent"] not in names:
-            raise OcError(f"OpenCode has no agent {job['agent']!r}. Available: {', '.join(n for n in names if n)}")
-        return w.create_session(job["title"])
-    finally:
-        proc.terminate()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            proc.kill()
-
-
 def _launch(slug: str, task: str) -> str:
-    """Second half of ``start``: session, tab, wait for the worker, send the task."""
+    """Second half of ``start``: open the tab, wait for its worker and session, send the task."""
     job = core.load_job(slug)
-    job["session"] = _precreate_session(job)
-    core.save_job(job)
-    job["tab"] = terminal.open_tab(f"{terminal.TITLE_PREFIX} {slug}", _worker_command(job, job["session"], True),
-                                   cwd=job["dir"])
+    job["tab"] = terminal.open_tab(f"{terminal.TITLE_PREFIX} {slug}", _worker_command(job, True), cwd=job["dir"])
     core.save_job(job)
     w = core.worker_of(job)
-    if not _wait_alive(w, START_TIMEOUT_S):
-        raise OcError(f"worker on port {job['port']} did not come up - look at its tab")
-    w.prompt(job["session"], task, job["agent"], job.get("model"))
+    end = time.time() + START_TIMEOUT_S
+    while True:
+        job = core.load_job(slug)
+        if job.get("start_error"):
+            raise OcError(job["start_error"])
+        if job.get("session") and w.alive():
+            break
+        if time.time() > end:
+            raise OcError(f"worker on port {job['port']} did not come up - look at its tab")
+        time.sleep(1)
+    w.prompt(job["session"], task)
     job["sent_at"] = time.time()
     core.save_job(job)
     return (f"{job['tab']}\nsession {job['session']} on port {job['port']}, agent {job['agent']}"
@@ -299,7 +362,7 @@ def send(slug: str, text: str) -> str:
         reopened = " (worker was stopped - reopened its tab in the same session)"
         job = core.load_job(slug)  # open_ changed the job file
     snapshot(slug, f"oc snapshot {slug}: before a follow-up message")  # a correction can make it worse
-    w.prompt(job["session"], text, job.get("agent"), job.get("model"))
+    w.prompt(job["session"], text)
     job["sent_at"] = time.time()
     job.pop("review", None)  # new work, new review
     core.save_job(job)
@@ -338,7 +401,7 @@ def report(slug: str) -> str:
     if job.get("start_error"):
         lines.append(f"START FAILED: {job['start_error']}")
     if job.get("session") and w.alive():
-        rep = core.final_report(w.messages(job["session"], timeout=15))
+        rep = core.final_report(w.messages(job["session"], timeout=15), w.info(job["session"]))
         if rep["error"]:
             lines.append(f"ERROR in the last turn: {core.error_text(rep['error'])} - the work may be incomplete")
         lines.append(f"cost: ${rep['cost']:.2f}" + (f" ({rep['model']})" if rep["model"] else ""))
@@ -365,7 +428,7 @@ def format_pending(slug: str, pending: List[Dict[str, Any]]) -> str:
             opts = " | ".join(p["options"])
             lines.append(f"QUESTION [{p['id']}]: {p['text']}" + (f"  [options: {opts}]" if opts else ""))
         else:
-            lines.append(f"PERMISSION [{p['id']}]: {p['text']} {' '.join(p['patterns'])}")
+            lines.append(f"PERMISSION [{p['id']}]: {p['text']}")
     return "\n".join(lines)
 
 
@@ -415,6 +478,7 @@ def answer(slug: str, answers: List[str], question_id: Optional[str] = None) -> 
     ``question_id`` (shown by the monitor and ``status``) makes sure the answer
     lands on the question Claude read. Without it, two Claude sessions could
     answer the same question, and the second answer would hit the NEXT one.
+    In OpenCode 2 a question is a form; each sub-question is one of its fields.
     """
     job = core.load_job(slug)
     w = core.worker_of(job)
@@ -428,10 +492,11 @@ def answer(slug: str, answers: List[str], question_id: Optional[str] = None) -> 
             raise OcError(f"question {question_id} is no longer open in {slug}. Open now: "
                           + "; ".join(f"[{q['id']}] {q['text']}" for q in qs))
         target = question_id
-    n = sum(1 for q in qs if q["id"] == target)
-    if len(answers) != n:
-        raise OcError(f"question {target} has {n} part(s), got {len(answers)} answer(s)")
-    w.request("POST", f"/question/{target}/reply", {"answers": [[a] for a in answers]}, timeout=10)
+    fields = [q for q in qs if q["id"] == target]
+    if len(answers) != len(fields):
+        raise OcError(f"question {target} has {len(fields)} part(s), got {len(answers)} answer(s)")
+    reply = {f["key"]: ([a] if f.get("multiple") else a) for f, a in zip(fields, answers)}
+    w._post(f"/api/session/{job['session']}/form/{target}/reply", {"answer": reply})
     job.setdefault("answered", []).append(target)
     core.save_job(job)
     return f"answered question {target} in {slug}"
@@ -447,10 +512,10 @@ def permit(slug: str, reply: str, request_id: Optional[str] = None) -> str:
         ps = [p for p in ps if p["id"] == request_id]
     if not ps:
         raise OcError(f"no matching open permission request in {slug}")
-    w.request("POST", f"/permission/{ps[0]['id']}/reply", {"reply": reply}, timeout=10)
+    w._post(f"/api/session/{job['session']}/permission/{ps[0]['id']}/reply", {"decision": reply})
     job.setdefault("answered", []).append(ps[0]["id"])
     core.save_job(job)
-    return f"permission {reply} for {slug}: {ps[0]['text']} {' '.join(ps[0]['patterns'])}"
+    return f"permission {reply} for {slug}: {ps[0]['text']}"
 
 
 # --------------------------------------------------------------------------- review gate
@@ -603,8 +668,7 @@ def open_(slug: str) -> str:
     if core.worker_of(job).alive():
         return f"worker {slug} is running (port {job['port']}) - its tab is open"
     _set(slug, closed_reason=None)
-    return terminal.open_tab(f"{terminal.TITLE_PREFIX} {slug}", _worker_command(job, job.get("session"), False),
-                             cwd=job["dir"])
+    return terminal.open_tab(f"{terminal.TITLE_PREFIX} {slug}", _worker_command(job, False), cwd=job["dir"])
 
 
 def _listener_pids(port: int) -> List[int]:
@@ -612,14 +676,23 @@ def _listener_pids(port: int) -> List[int]:
     return [int(p) for p in res.stdout.split() if p.isdigit()]
 
 
+def _tab_pid(job: Dict[str, Any]) -> List[int]:
+    """The job's ``oc tab`` process, if it still runs - checked by its command line (PIDs get reused)."""
+    pid = job.get("tab_pid")
+    if not pid or not core.pid_alive(pid):
+        return []
+    args = subprocess.run(["ps", "-o", "args=", "-p", str(pid)], capture_output=True, text=True).stdout
+    return [int(pid)] if f" tab {job['slug']}" in args else []
+
+
 def close(slug: str) -> str:
-    """Stop the worker, then close its finished tab.
+    """Stop the worker (tab process, TUI and server), then close its finished tab.
 
     OpenCode needs about 1.2 s to exit after SIGTERM (measured); a tab that
     still holds the process is not closed, so wait for it to be gone.
     """
     job = core.load_job(slug)
-    pids = _listener_pids(int(job["port"]))
+    pids = _tab_pid(job) + _listener_pids(int(job["port"]))
     if not pids:
         return f"worker {slug} is not running"
     for pid in pids:
@@ -689,19 +762,27 @@ SELFTEST_COMMANDS = [
 ]
 
 
-def turn_error(res: Any) -> Optional[str]:
+def turn_error(msgs: List[Dict[str, Any]]) -> Optional[str]:
     """The provider error of a finished turn, e.g. an expired API key, or None.
 
     Without this the selftest blamed the model ("skipped it") when the provider
-    had refused the call (measured on 1.19.4: ``info.error`` with
-    ``name: APIError`` and ``data.message``, no parts).
+    had refused the call (measured on 2.1.4: the turn ends with an ``idle``
+    message, ``outcome: failed`` and ``error: {type, message}``).
     """
-    err = ((res or {}).get("info") or {}).get("error") if isinstance(res, dict) else None
-    if not err:
-        return None
-    msg = (err.get("data") or {}).get("message") if isinstance(err, dict) else None
-    name = err.get("name", "error") if isinstance(err, dict) else "error"
-    return f"{name}: {msg}" if msg else str(name)
+    err = core.final_report(msgs)["error"]
+    return core.error_text(err) if err else None
+
+
+def _shell_calls(msgs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    return [t for m in msgs if m.get("type") == "assistant" for t in core._tools(m)
+            if t.get("name") in ("shell", "bash")]
+
+
+def _output(tool: Dict[str, Any]) -> str:
+    state = tool.get("state") or {}
+    text = " ".join(c.get("text", "") for c in state.get("content") or [] if isinstance(c, dict))
+    err = state.get("error")
+    return text + " " + (core.error_text(err) if isinstance(err, dict) else str(err or ""))
 
 
 def ran_as(part: Dict[str, Any], cmd: str) -> str:
@@ -728,6 +809,19 @@ def ran_the_command(part: Dict[str, Any], cmd: str) -> bool:
     return not isinstance(actual, str) or cmd.strip() in actual
 
 
+def _wait_turn(w: core.Worker, sid: str, seconds: float) -> None:
+    """Until the session's turn is over. OpenCode 2 has a blocking ``wait`` (experimental); poll as fallback."""
+    try:
+        w.request("POST", f"/api/experimental/session/{sid}/wait", timeout=seconds)
+        return
+    except Exception:
+        pass
+    end = time.time() + seconds
+    time.sleep(2)
+    while time.time() < end and w.busy(sid):
+        time.sleep(2)
+
+
 def selftest(model: Optional[str] = None) -> str:
     """Prove both guard layers in a throw-away repository.
 
@@ -735,7 +829,7 @@ def selftest(model: Optional[str] = None) -> str:
     remote must not contain any ``oc-selftest-*`` branch. The user's own
     repository is never touched, so a failing guard cannot push anywhere real.
     """
-    core.require_opencode_1()
+    core.require_opencode_2()
     tmp = tempfile.mkdtemp(prefix="oc-selftest-")
     origin, repo = os.path.join(tmp, "origin.git"), os.path.join(tmp, "repo")
     subprocess.run(["git", "init", "-q", "--bare", origin], check=True)
@@ -746,34 +840,34 @@ def selftest(model: Optional[str] = None) -> str:
                  ["push", "-q", "origin", "HEAD:main"]):
         subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
     port = free_port()
+    password = secrets.token_urlsafe(18)
     proc = subprocess.Popen([core.opencode_bin(), "serve", "--port", str(port)], cwd=repo,
-                            env=dict(os.environ, **worker_env()),
+                            env=dict(os.environ, **worker_env(), OPENCODE_SERVER_PASSWORD=password),
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     lines = []
     ran_unblocked = skipped = False
+    model = model or os.environ.get("OC_MODEL") or None
     try:
-        w = core.Worker(port, repo)
+        w = core.Worker(port, repo, password)
         if not _wait_alive(w, 60):
             raise OcError("opencode serve did not start")
         for i, template in enumerate(SELFTEST_COMMANDS):
             cmd = template.format(origin=origin)
-            sid = w.create_session("oc-connect selftest")
-            body: Dict[str, Any] = {"agent": "build", "parts": [{"type": "text", "text": (
-                "This is a test of a sandbox I own. Run this exact bash command once with the bash tool, "
-                f"unchanged, then reply with its output only:\n{cmd}")}]}
-            if model:
-                prov, _, mid = model.partition("/")
-                body["model"] = {"providerID": prov, "modelID": mid}
-            res = w.request("POST", f"/session/{sid}/message", body, timeout=240)
-            failed = turn_error(res)
-            if failed:
-                w.request("DELETE", f"/session/{sid}", timeout=10)
+            sid = w.create_session("oc-connect selftest", "build", model, guard_rules())
+            w.prompt(sid, "This is a test of a sandbox I own. Run this exact command once with the shell tool, "
+                          f"unchanged, then reply with its output only:\n{cmd}")
+            _wait_turn(w, sid, 240)
+            msgs = w.messages(sid, timeout=15)
+            try:
+                w.request("DELETE", f"/api/session/{sid}", timeout=10)
+            except Exception:
+                pass
+            failed = turn_error(msgs)
+            ran = _shell_calls(msgs)
+            if failed and not ran:
                 skipped = True
                 lines.append(f"  NOT RUN                  {cmd}  ({failed})")
                 continue
-            ran = [p for m in w.messages(sid, timeout=15) for p in m.get("parts", [])
-                   if p.get("type") == "tool" and p.get("tool") == "bash"]
-            w.request("DELETE", f"/session/{sid}", timeout=10)
             if not ran:
                 skipped = True
                 lines.append(f"  NOT RUN                  {cmd}  (the model skipped it)")
@@ -783,8 +877,8 @@ def selftest(model: Optional[str] = None) -> str:
                 lines.append(f"  NOT RUN                  {cmd}  (the model ran something else){ran_as(ran[0], cmd)}")
                 continue
             state = ran[0].get("state", {})
-            out = str(state.get("output") or state.get("error") or "")
-            if state.get("status") == "error":
+            out = _output(ran[0])
+            if state.get("status") == "error" and "permission" in out:
                 verdict = "blocked (guard)"
             elif "push-disabled" in out or "docker-disabled" in out:
                 verdict = "blocked (environment)"

@@ -26,50 +26,79 @@ from occ import core, hooks, mcp, monitor, ops, profile, reaper, statusline, ter
 
 
 class FakeOpenCode(BaseHTTPRequestHandler):
-    """Answers the handful of endpoints oc-connect reads."""
-    status = {}
-    questions = []
-    permissions = []
-    todos = []
-    error = None
+    """Answers the OpenCode 2 endpoints oc-connect reads - shapes as measured on 2.1.4."""
+    active = {}        # session id -> {"type": "running"}
+    forms = []         # Form.Info
+    permissions = []   # Permission.Request
+    error = None       # error of the last turn: its idle message says "failed"
+    cost = 0.5
     updated = 1000
     replies = []
+    password = "pw"
 
     def log_message(self, *args):
         pass
 
-    def _send(self, body):
-        raw = json.dumps(body).encode()
-        self.send_response(200)
+    def _send(self, body, code=200):
+        raw = b"" if body is None else json.dumps(body).encode()
+        self.send_response(code if raw or code != 200 else 204)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(raw)))
         self.end_headers()
         self.wfile.write(raw)
 
+    def _authorized(self):
+        import base64
+        want = "Basic " + base64.b64encode(f"opencode:{FakeOpenCode.password}".encode()).decode()
+        if self.headers.get("Authorization") == want:
+            return True
+        self._send({"error": "unauthorized"}, 401)
+        return False
+
     def do_GET(self):
+        if not self._authorized():
+            return
         path = self.path.split("?")[0]
-        if path == "/doc":
-            return self._send({})
-        if path == "/session/status":
-            return self._send(FakeOpenCode.status)
-        if path == "/question":
-            return self._send(FakeOpenCode.questions)
-        if path == "/permission":
-            return self._send(FakeOpenCode.permissions)
-        if path.endswith("/todo"):
-            return self._send(FakeOpenCode.todos)
-        if path.endswith("/message"):
-            return self._send([{"info": {"role": "assistant", "cost": 0.5, "modelID": "m",
-                                         "error": FakeOpenCode.error},
-                                "parts": [{"type": "text", "text": "all done"}]}])
-        if path.startswith("/session/"):
-            return self._send({"id": path.split("/")[2], "time": {"updated": FakeOpenCode.updated}})
-        self._send(None)
+        parts = path.strip("/").split("/")
+        if path == "/api/info":
+            return self._send({"version": "2.1.4"})
+        if path == "/api/session/active":
+            return self._send({"data": FakeOpenCode.active})
+        if path == "/api/agent":
+            return self._send({"data": [{"id": "build"}, {"id": "oc-fast"}, {"id": "fixer"}]})
+        if len(parts) == 4 and parts[3] == "form":
+            return self._send({"data": [f for f in FakeOpenCode.forms if f["sessionID"] == parts[2]]})
+        if len(parts) == 4 and parts[3] == "permission":
+            return self._send({"data": [r for r in FakeOpenCode.permissions if r["sessionID"] == parts[2]]})
+        if len(parts) == 4 and parts[3] == "message":
+            err = FakeOpenCode.error
+            msgs = [  # newest first, like the API
+                {"id": "m3", "type": "idle", "time": {"created": 3}, "outcome": "failed" if err else "succeeded",
+                 **({"error": err} if err else {})},
+                {"id": "m2", "type": "assistant", "time": {"created": 2}, "model": {"id": "m", "providerID": "p"},
+                 "content": [{"type": "tool", "name": "edit", "state": {"status": "completed",
+                                                                       "input": {"path": "/w/src/app.js"}}},
+                             {"type": "text", "text": "all done"}]},
+                {"id": "m1", "type": "user", "time": {"created": 1}, "text": "task"}]
+            return self._send({"data": msgs, "cursor": {}})
+        if len(parts) == 3 and parts[1] == "session":
+            return self._send({"data": {"id": parts[2], "cost": FakeOpenCode.cost,
+                                        "model": {"id": "m", "providerID": "p"},
+                                        "time": {"updated": FakeOpenCode.updated}}})
+        self._send({"error": "not found"}, 404)
 
     def do_POST(self):
+        if not self._authorized():
+            return
         length = int(self.headers.get("Content-Length") or 0)
-        FakeOpenCode.replies.append((self.path.split("?")[0], json.loads(self.rfile.read(length) or b"null")))
-        self._send(True)
+        path = self.path.split("?")[0]
+        FakeOpenCode.replies.append((path, json.loads(self.rfile.read(length) or b"null")))
+        if path == "/api/session":
+            return self._send({"data": {"id": "ses_new"}})
+        self._send(None)
+
+    def do_DELETE(self):
+        self.do_POST()
 
 
 def start_fake():
@@ -91,33 +120,41 @@ class StateMachine(unittest.TestCase):
         cls.srv.server_close()
 
     def setUp(self):
-        FakeOpenCode.status, FakeOpenCode.questions, FakeOpenCode.permissions, FakeOpenCode.todos = {}, [], [], []
+        FakeOpenCode.active, FakeOpenCode.forms, FakeOpenCode.permissions = {}, [], []
         FakeOpenCode.error, FakeOpenCode.replies = None, []
         FakeOpenCode.updated += 1  # fresh summary cache per test
         core.save_job({"slug": "t1", "title": "#1 Test job", "dir": self.dir, "port": self.srv.server_port,
-                       "session": "ses_1", "agent": "fixer", "created": time.time(), "sent_at": time.time() - 3600})
+                       "session": "ses_1", "agent": "fixer", "created": time.time(), "sent_at": time.time() - 3600,
+                       "password": "pw"})
 
     def tearDown(self):
         core.delete_job("t1")
 
-    def test_busy_session_is_running(self):
-        FakeOpenCode.status = {"ses_1": {"type": "busy"}}
-        FakeOpenCode.todos = [{"status": "completed"}, {"status": "pending"}]
+    def test_active_session_is_running(self):
+        FakeOpenCode.active = {"ses_1": {"type": "running"}}
         st = ops.status("t1")
         self.assertEqual(st["state"], "running")
-        self.assertEqual((st["todo_done"], st["todo_total"]), (1, 2))
+        self.assertEqual(st["cost"], 0.5)  # from the cheap session header
+
+    def test_wrong_password_counts_as_no_worker(self):
+        job = core.load_job("t1")
+        job["password"] = "other"
+        core.save_job(job)
+        self.assertEqual(ops.status("t1")["state"], "stopped")
 
     def test_question_wins_over_busy(self):
         # An open question keeps the session busy; it must still show as waiting.
-        FakeOpenCode.status = {"ses_1": {"type": "busy"}}
-        FakeOpenCode.questions = [{"id": "q1", "sessionID": "ses_1",
-                                   "questions": [{"question": "Which?", "options": [{"label": "a"}]}]}]
+        FakeOpenCode.active = {"ses_1": {"type": "running"}}
+        FakeOpenCode.forms = [{"id": "frm_1", "sessionID": "ses_1", "title": "Questions",
+                               "fields": [{"key": "q0", "title": "Mode", "description": "Which?", "type": "string",
+                                           "options": [{"value": "a", "label": "a"}], "custom": True}]}]
         st = ops.status("t1")
         self.assertEqual(st["state"], "waiting")
         self.assertEqual(st["pending"][0]["options"], ["a"])
 
     def test_question_of_other_session_is_ignored(self):
-        FakeOpenCode.questions = [{"id": "q1", "sessionID": "ses_other", "questions": [{"question": "x"}]}]
+        FakeOpenCode.forms = [{"id": "frm_1", "sessionID": "ses_other", "title": "Questions",
+                               "fields": [{"key": "q0", "type": "string"}]}]
         self.assertEqual(ops.status("t1")["state"], "done")
 
     def test_idle_session_is_done_after_grace(self):
@@ -130,8 +167,8 @@ class StateMachine(unittest.TestCase):
         core.save_job(job)
         self.assertEqual(ops.status("t1")["state"], "running")
 
-    def test_idle_status_entry_is_not_busy(self):
-        FakeOpenCode.status = {"ses_1": {"type": "idle"}}
+    def test_other_active_session_is_not_ours(self):
+        FakeOpenCode.active = {"ses_other": {"type": "running"}}
         self.assertEqual(ops.status("t1")["state"], "done")
 
     def test_worker_not_up_before_task_sent_is_starting(self):
@@ -155,10 +192,15 @@ class StateMachine(unittest.TestCase):
         self.assertEqual(ops.status("t1")["state"], "stopped")
 
     def test_wait_returns_code_2_for_question(self):
-        FakeOpenCode.permissions = [{"id": "p1", "sessionID": "ses_1", "permission": "bash", "patterns": ["rm -rf x"]}]
+        FakeOpenCode.permissions = [{"id": "per_1", "sessionID": "ses_1", "action": "shell", "resources": ["rm -rf x"]}]
         code, text = ops.wait("t1", minutes=0.01, poll=0.01)
         self.assertEqual(code, 2)
-        self.assertIn("PERMISSION [p1]: bash rm -rf x", text)
+        self.assertIn("PERMISSION [per_1]: shell: rm -rf x", text)
+
+    def test_permit_sends_the_decision(self):
+        FakeOpenCode.permissions = [{"id": "per_1", "sessionID": "ses_1", "action": "shell", "resources": ["x"]}]
+        ops.permit("t1", "once")
+        self.assertEqual(FakeOpenCode.replies[-1], ("/api/session/ses_1/permission/per_1/reply", {"decision": "once"}))
 
     def test_wait_returns_report_when_done(self):
         code, text = ops.wait("t1", minutes=0.01, poll=0.01)
@@ -172,7 +214,7 @@ class StateMachine(unittest.TestCase):
         self.assertFalse(os.path.exists(core.job_path("gone")))
 
     def test_error_in_last_turn_is_failed_not_done(self):
-        FakeOpenCode.error = {"name": "APIError", "data": {"message": "rate limited"}}
+        FakeOpenCode.error = {"type": "provider.rate-limit", "message": "rate limited"}
         st = ops.status("t1")
         self.assertEqual(st["state"], "failed")
         self.assertIn("rate limited", st["error"])
@@ -186,16 +228,27 @@ class StateMachine(unittest.TestCase):
         st = ops.status("t1")
         self.assertEqual((st["state"], st["error"]), ("failed", "OpenCode has no agent 'fixr'"))
 
-    def _question(self, qid="q1", parts=1):
-        FakeOpenCode.status = {"ses_1": {"type": "busy"}}
-        FakeOpenCode.questions = [{"id": qid, "sessionID": "ses_1",
-                                   "questions": [{"question": f"Q{i}", "options": []} for i in range(parts)]}]
+    def _question(self, qid="q1", parts=1, kind="string"):
+        FakeOpenCode.active = {"ses_1": {"type": "running"}}
+        FakeOpenCode.forms = [{"id": qid, "sessionID": "ses_1", "title": "Questions",
+                               "fields": [{"key": f"q{i}", "title": f"Q{i}", "type": kind, "options": []}
+                                          for i in range(parts)]}]
 
     def test_answer_goes_to_the_named_question(self):
         self._question("q7")
         ops.answer("t1", ["yes"], "q7")
-        self.assertEqual(FakeOpenCode.replies[-1], ("/question/q7/reply", {"answers": [["yes"]]}))
+        self.assertEqual(FakeOpenCode.replies[-1], ("/api/session/ses_1/form/q7/reply", {"answer": {"q0": "yes"}}))
         self.assertIn("q7", core.load_job("t1")["answered"])
+
+    def test_answers_go_to_their_fields(self):
+        self._question("q8", parts=2)
+        ops.answer("t1", ["a", "b"], "q8")
+        self.assertEqual(FakeOpenCode.replies[-1][1], {"answer": {"q0": "a", "q1": "b"}})
+
+    def test_multiselect_answer_is_a_list(self):
+        self._question("q9", kind="multiselect")
+        ops.answer("t1", ["x"], "q9")
+        self.assertEqual(FakeOpenCode.replies[-1][1], {"answer": {"q0": ["x"]}})
 
     def test_answer_to_a_question_that_is_gone_is_refused(self):
         # A second Claude session must not answer the NEXT question by accident.
@@ -541,6 +594,10 @@ class WorkerProfile(unittest.TestCase):
                                                           "designer": {"model": "go/kimi"}}}}, fh)
         for name in ("vibe-island.js", "package.json"):
             open(os.path.join(self.oc, "plugins", name), "w").close()
+        os.makedirs(os.path.join(self.oc, "plugins", "vibe-island-tui"))       # a tracker's TUI part
+        os.makedirs(os.path.join(self.oc, "plugins", "oh-my-opencode-slim"))
+        with open(os.path.join(self.oc, "cli.json"), "w") as fh:
+            json.dump({"theme": {"name": "orng"}, "plugins": ["oh-my-opencode-slim", "./tracker-tui"]}, fh)
         self.home = os.path.join(tempfile.mkdtemp(), "worker-home")
         self.patches = [mock.patch.object(core, "OPENCODE_CONFIG_DIR", self.oc),
                         mock.patch.object(profile, "USER_CONFIG", self.user),
@@ -552,24 +609,33 @@ class WorkerProfile(unittest.TestCase):
         for p in self.patches:
             p.stop()
 
-    def test_config_has_primary_agents_question_tool_and_no_plugins(self):
-        cfg = profile.build_config()
+    def test_config_has_primary_agents_question_tool_guard_and_no_plugins(self):
+        guard = [{"action": "shell", "resource": "git push*", "effect": "deny"}]
+        cfg = profile.build_config(guard)
         self.assertNotIn("plugin", cfg)
-        self.assertEqual(cfg["permission"], {"question": "allow"})
+        self.assertNotIn("plugins", cfg)
+        self.assertEqual(cfg["permissions"], [{"action": "question", "resource": "*", "effect": "allow"}] + guard)
         self.assertEqual(cfg["mcp"], {"pw": {"type": "local"}})
-        self.assertEqual({a["mode"] for a in cfg["agent"].values()}, {"primary"})
-        self.assertEqual(cfg["agent"]["oc-fast"]["model"], "go/flash")
-        self.assertEqual(cfg["agent"]["oc-ui"]["model"], "go/kimi")
-        self.assertNotIn("model", cfg["agent"]["oc-strong"])  # no orchestrator role: OpenCode default
-        self.assertIn("worker-prompt.md", cfg["agent"]["oc-fast"]["prompt"])
+        self.assertEqual({a["mode"] for a in cfg["agents"].values()}, {"primary"})
+        # OpenCode 2 drops agents that name a model: the model goes onto the session instead.
+        self.assertFalse(any("model" in a for a in cfg["agents"].values()))
+        self.assertEqual(profile.agent_models()["oc-fast"], "go/flash")
+        self.assertEqual(profile.agent_models()["oc-ui"], "go/kimi")
+        self.assertIsNone(profile.agent_models()["oc-strong"])  # no orchestrator role: OpenCode default
+        self.assertIn("You are a builder", cfg["agents"]["oc-fast"]["system"])
 
-    def test_home_mirrors_other_tools_and_keeps_only_plugin_files(self):
+    def test_home_mirrors_other_tools_and_keeps_only_local_plugins(self):
         home = profile.ensure_home()
         self.assertEqual(os.readlink(os.path.join(home, "gh")), os.path.join(self.user, "gh"))
         self.assertFalse(os.path.islink(os.path.join(home, "opencode")))
-        self.assertEqual(os.listdir(os.path.join(home, "opencode", "plugins")), ["vibe-island.js"])
+        self.assertEqual(sorted(os.listdir(os.path.join(home, "opencode", "plugins"))),
+                         ["vibe-island-tui", "vibe-island.js"])
         with open(os.path.join(home, "opencode", "opencode.json")) as fh:
-            self.assertIn("oc-fast", json.load(fh)["agent"])
+            self.assertIn("oc-fast", json.load(fh)["agents"])
+        with open(os.path.join(home, "opencode", "cli.json")) as fh:
+            cli = json.load(fh)
+        self.assertEqual(cli["plugins"], ["./tracker-tui"])  # the TUI keeps its trackers, not oh-my-opencode
+        self.assertEqual(cli["theme"], {"name": "orng"})
         os.rmdir(os.path.join(self.user, "gh"))  # removed from ~/.config -> link goes
         profile.ensure_home()
         self.assertFalse(os.path.lexists(os.path.join(home, "gh")))
@@ -577,10 +643,11 @@ class WorkerProfile(unittest.TestCase):
     def test_worker_env_and_command_use_the_profile(self):
         env = ops.worker_env()
         self.assertEqual(env["XDG_CONFIG_HOME"], self.home)
-        cmd = ops._worker_command({"slug": "s1", "dir": "/w", "port": 4101, "agent": "oc-fast"}, "ses_1", False)
-        self.assertIn("--agent oc-fast", cmd)
-        cmd = ops._worker_command({"slug": "s1", "dir": "/w", "port": 4101, "agent": "fixer"}, "ses_1", False)
-        self.assertNotIn("--agent", cmd)  # subagents cannot be TUI agents
+        self.assertEqual(env["OPENCODE_CONFIG"], ops.guard_config())
+        cmd = ops._worker_command({"slug": "s1", "dir": "/w", "port": 4101, "agent": "oc-fast"}, False)
+        self.assertIn("OC_PROFILE=isolated", cmd)  # the tab's login shell does not see Claude's environment
+        self.assertIn(f"OC_STATE={core.STATE_DIR}", cmd)
+        self.assertTrue(cmd.endswith("/bin/oc tab s1"))
 
     def test_inherit_mode_leaves_the_user_config_alone(self):
         with mock.patch.dict(os.environ, {"OC_PROFILE": "inherit"}):
@@ -637,7 +704,7 @@ class Reaper(unittest.TestCase):
 
     def test_tab_starts_the_reaper_on_the_worker_pid(self):
         with mock.patch.dict(os.environ, {"OC_IDLE_CLOSE_MIN": "3"}):
-            cmd = ops._worker_command({"slug": "s1", "dir": "/w", "port": 4101, "agent": "oc-fast"}, "ses_1", False)
+            cmd = ops._worker_command({"slug": "s1", "dir": "/w", "port": 4101, "agent": "oc-fast"}, False)
         reap, _, run = cmd.rpartition("; ")
         self.assertIn("/bin/oc reap s1 $$ 180 ", reap)  # the limit travels with the command
         self.assertTrue(reap.endswith("&)"))  # in the background, before exec
@@ -650,7 +717,7 @@ class Reaper(unittest.TestCase):
         d = tempfile.mkdtemp()
         subprocess.run(["git", "init", "-q", d], check=True)
         core.save_job({"slug": "r1", "dir": d, "port": srv.server_port, "session": "ses_1", "agent": "fixer",
-                       "created": time.time(), "closed_reason": "idle for 20 min"})
+                       "created": time.time(), "closed_reason": "idle for 20 min", "password": "pw"})
         self.addCleanup(core.delete_job, "r1")
         FakeOpenCode.replies = []
         with mock.patch.object(core.Worker, "alive", return_value=False), \
@@ -660,7 +727,7 @@ class Reaper(unittest.TestCase):
         tab.assert_called_once()
         self.assertIn("reopened", out)
         self.assertNotIn("closed_reason", core.load_job("r1"))
-        self.assertTrue(any(p.endswith("/ses_1/message") or "ses_1" in p for p, _ in FakeOpenCode.replies))
+        self.assertIn(("/api/session/ses_1/prompt", {"text": "fix it"}), FakeOpenCode.replies)
 
     def test_close_waits_for_the_worker_before_closing_its_tab(self):
         core.save_job({"slug": "c1", "dir": "/w", "port": 4101, "created": time.time()})
@@ -806,37 +873,55 @@ class Release(unittest.TestCase):
         self.assertEqual(core.opencode_major("opencode v2.0.29"), 2)
         self.assertIsNone(core.opencode_major(None))
 
-    def test_opencode_2_is_refused_with_a_clear_message(self):
-        with mock.patch.object(core, "_opencode_version", return_value="opencode v2.0.29"):
+    def test_opencode_1_is_refused_with_a_clear_message(self):
+        with mock.patch.object(core, "_opencode_version", return_value="1.19.4"):
             with self.assertRaises(core.OcError) as ctx:
-                core.require_opencode_1()
-        self.assertIn("needs OpenCode 1.x", str(ctx.exception))
-        for v in ("1.19.4", None):
+                core.require_opencode_2()
+        self.assertIn("needs OpenCode 2", str(ctx.exception))
+        self.assertIn("oc-connect#v1", str(ctx.exception))  # where OpenCode 1 users go
+        for v in ("opencode v2.1.4", None):
             with mock.patch.object(core, "_opencode_version", return_value=v):
-                core.require_opencode_1()
+                core.require_opencode_2()
 
     def test_oc_opencode_points_to_a_second_install(self):
         with tempfile.TemporaryDirectory() as d:
-            fake = os.path.join(d, "opencode 1")
+            fake = os.path.join(d, "opencode 2")
             with open(fake, "w") as fh:
-                fh.write("#!/bin/sh\necho 1.19.4\n")
+                fh.write("#!/bin/sh\necho opencode v2.1.4\n")
             os.chmod(fake, 0o755)
             with mock.patch.dict(os.environ, {"OC_OPENCODE": fake}):
-                self.assertEqual(core._opencode_version(), "1.19.4")
-                core.require_opencode_1()
+                self.assertEqual(core._opencode_version(), "opencode v2.1.4")
+                core.require_opencode_2()
                 self.assertEqual(core.opencode_setup()["opencode"], fake)
-                cmd = ops._worker_command({"slug": "s1", "dir": "/w", "port": 4101, "agent": "oc-fast"}, "ses_1", False)
-                self.assertIn(f"'{fake}' --port 4101", cmd)
+                cmd = ops._worker_command({"slug": "s1", "dir": "/w", "port": 4101, "agent": "oc-fast"}, False)
+                self.assertIn(f"OC_OPENCODE='{fake}'", cmd)  # travels to the tab
 
     def test_selftest_names_the_provider_error(self):
-        res = {"info": {"error": {"name": "APIError", "data": {"message": "This API key has expired.",
-                                                                "statusCode": 401}}}, "parts": []}
-        self.assertEqual(ops.turn_error(res), "APIError: This API key has expired.")
-        self.assertIsNone(ops.turn_error({"info": {"role": "assistant"}, "parts": []}))
-        self.assertIsNone(ops.turn_error(True))
+        err = {"type": "provider.invalid-request", "message": "Allow free endpoints in your workspace"}
+        msgs = [{"type": "user", "time": {"created": 1}, "text": "x"},
+                {"type": "assistant", "time": {"created": 2}, "content": [], "finish": "error", "error": err},
+                {"type": "idle", "time": {"created": 3}, "outcome": "failed", "error": err}]
+        self.assertEqual(ops.turn_error(msgs), "provider.invalid-request: Allow free endpoints in your workspace")
+        msgs[-1] = {"type": "idle", "time": {"created": 3}, "outcome": "succeeded"}
+        self.assertIsNone(ops.turn_error(msgs))
+        self.assertIsNone(ops.turn_error([]))
+
+    def test_guard_reads_the_1x_format_in_rule_order(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "guard.json")
+            with open(path, "w") as fh:
+                json.dump({"permission": {"bash": {"*": "allow", "git push*": "deny"},
+                                          "external_directory": "deny"}}, fh)
+            self.assertEqual(ops.guard_rules(path), [
+                {"action": "shell", "resource": "*", "effect": "allow"},
+                {"action": "shell", "resource": "git push*", "effect": "deny"},   # last match wins
+                {"action": "external_directory", "resource": "*", "effect": "deny"}])
+        template = ops.guard_rules(os.path.join(ROOT, "templates", "guard.json"))
+        self.assertEqual(template[0], {"action": "shell", "resource": "*", "effect": "allow"})
+        self.assertIn({"action": "shell", "resource": "git push*", "effect": "deny"}, template)
 
     def test_selftest_shows_a_changed_command(self):
-        part = {"type": "tool", "tool": "bash", "state": {"status": "completed",
+        part = {"type": "tool", "name": "shell", "state": {"status": "completed",
                                                           "input": {"command": "cd /tmp/r && git push origin x"}}}
         self.assertEqual(ops.ran_as(part, "git push origin x"), "  (ran as: cd /tmp/r && git push origin x)")
         part["state"]["input"]["command"] = "git push origin x"

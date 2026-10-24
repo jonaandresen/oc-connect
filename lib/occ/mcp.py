@@ -105,7 +105,7 @@ TOOLS: Dict[str, Dict[str, Any]] = {
         }},
     },
     "status": {
-        "description": "State of all OpenCode jobs (running / waiting / done / stopped), with todos, "
+        "description": "State of all OpenCode jobs (running / waiting / done / stopped), with "
                        "last activity, diff size, cost and open questions.",
         "inputSchema": {"type": "object", "properties": {}},
         "annotations": {"readOnlyHint": True},

@@ -12,6 +12,7 @@ of raising.
 """
 from __future__ import annotations
 
+import base64
 import json
 import os
 import re
@@ -22,7 +23,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional
 
-VERSION = "1.0.0"  # keep equal to .claude-plugin/plugin.json (a test checks it)
+VERSION = "2.0.0"  # keep equal to .claude-plugin/plugin.json (a test checks it)
 
 STATE_DIR = os.environ.get("OC_STATE") or os.path.expanduser("~/.local/state/oc-connect")
 JOBS_DIR = os.path.join(STATE_DIR, "jobs")
@@ -213,28 +214,38 @@ def diffstat(path: str) -> Dict[str, int]:
 
 # --------------------------------------------------------------------------- OpenCode HTTP
 
-class Worker:
-    """Thin client for one OpenCode server process (one job).
+def model_ref(model: str) -> Dict[str, str]:
+    """``provider/model`` -> OpenCode 2's model reference."""
+    prov, _, mid = model.partition("/")
+    return {"providerID": prov, "id": mid}
 
-    Every call is scoped with ``?directory=``: OpenCode answers session status,
-    questions and permissions only per project directory.
+
+class Worker:
+    """Thin client for one OpenCode 2 server process (one job).
+
+    OpenCode 2 serves its API under ``/api`` behind HTTP basic auth: user
+    ``opencode``, password from the server's ``OPENCODE_SERVER_PASSWORD``. Every
+    job runs its own server in its worktree, so all routes are already scoped
+    to the job's directory.
     """
 
-    def __init__(self, port: int, directory: str) -> None:
+    def __init__(self, port: int, directory: str, password: str = "") -> None:
         self.base = f"http://127.0.0.1:{port}"
         self.directory = directory
-
-    def _url(self, path: str) -> str:
-        sep = "&" if "?" in path else "?"
-        return f"{self.base}{path}{sep}directory={urllib.parse.quote(self.directory)}"
+        self.auth = "Basic " + base64.b64encode(f"opencode:{password}".encode()).decode()
 
     def request(self, method: str, path: str, body: Any = None, timeout: float = 3) -> Any:
         data = None if body is None else json.dumps(body).encode()
-        req = urllib.request.Request(self._url(path), data=data, method=method,
-                                     headers={"Content-Type": "application/json"})
-        with urllib.request.urlopen(req, timeout=timeout) as res:
-            raw = res.read()
-            return json.loads(raw) if raw else None
+        req = urllib.request.Request(self.base + path, data=data, method=method,
+                                     headers={"Content-Type": "application/json", "Authorization": self.auth})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as res:
+                raw = res.read()
+                return json.loads(raw) if raw.strip() else None
+        except urllib.error.HTTPError as exc:
+            body = exc.read()
+            exc.close()
+            raise OcError(f"{method} {path} returned HTTP {exc.code}: {body[:300]!r}") from None
 
     def get(self, path: str, timeout: float = 3) -> Any:
         """GET that never raises; ``None`` on any failure."""
@@ -243,83 +254,80 @@ class Worker:
         except Exception:
             return None
 
+    def data(self, path: str, timeout: float = 3) -> Any:
+        """The ``data`` member of a GET answer, or None."""
+        res = self.get(path, timeout=timeout)
+        return res.get("data") if isinstance(res, dict) else None
+
     def alive(self, timeout: float = 1) -> bool:
         try:
-            urllib.request.urlopen(self.base + "/doc", timeout=timeout).close()
+            self.request("GET", "/api/info", timeout=timeout)
             return True
         except Exception:
             return False
 
-    def create_session(self, title: str) -> str:
-        return self.request("POST", "/session", {"title": title}, timeout=10)["id"]
+    def _post(self, path: str, body: Any, timeout: float = 10) -> Any:
+        return self.request("POST", path, body, timeout=timeout)
 
-    def prompt(self, session: str, text: str, agent: Optional[str], model: Optional[str] = None) -> None:
-        body: Dict[str, Any] = {"parts": [{"type": "text", "text": text}]}
+    def agents(self) -> List[str]:
+        return [a.get("id") for a in (self.data("/api/agent", timeout=10) or []) if a.get("id")]
+
+    def create_session(self, title: str, agent: Optional[str] = None, model: Optional[str] = None,
+                       permissions: Optional[List[Dict[str, str]]] = None) -> str:
+        body: Dict[str, Any] = {"title": title}
         if agent:
             body["agent"] = agent
-        if model:  # "provider/model"; overrides the agent's own model
-            prov, _, mid = model.partition("/")
-            body["model"] = {"providerID": prov, "modelID": mid}
-        req = urllib.request.Request(self._url(f"/session/{session}/prompt_async"),
-                                     data=json.dumps(body).encode(), method="POST",
-                                     headers={"Content-Type": "application/json"})
-        try:
-            with urllib.request.urlopen(req, timeout=10) as res:
-                if res.status not in (200, 204):
-                    raise OcError(f"prompt_async returned HTTP {res.status}")
-        except urllib.error.HTTPError as exc:
-            raise OcError(f"prompt_async returned HTTP {exc.code}: {exc.read()[:300]!r}")
+        if model:
+            body["model"] = model_ref(model)
+        if permissions:
+            body["permissions"] = permissions
+        return self._post("/api/session", body)["data"]["id"]
 
-    def select_session(self, session: str) -> None:
-        """Switch this process's TUI to the session (affects only this tab)."""
-        try:
-            req = urllib.request.Request(self.base + "/tui/select-session",
-                                         data=json.dumps({"sessionID": session}).encode(),
-                                         method="POST", headers={"Content-Type": "application/json"})
-            urllib.request.urlopen(req, timeout=3).close()
-        except Exception:
-            pass
+    def prompt(self, session: str, text: str, agent: Optional[str] = None, model: Optional[str] = None) -> None:
+        """Queue a message; OpenCode 2 answers at once and works in the background."""
+        if agent:
+            self._post(f"/api/session/{session}/agent", {"agent": agent})
+        if model:  # "provider/model"; overrides the agent's model
+            self._post(f"/api/session/{session}/model", {"model": model_ref(model)})
+        self._post(f"/api/session/{session}/prompt", {"text": text})
 
     def busy(self, session: str) -> Optional[bool]:
-        st = self.get("/session/status")
-        if st is None:
-            return None
-        entry = st.get(session)
-        return bool(entry) and (entry.get("type") != "idle" if isinstance(entry, dict) else True)
+        active = self.data("/api/session/active")
+        return None if active is None else session in active
 
     def pending(self, session: str) -> List[Dict[str, Any]]:
-        """Open questions and permission requests of one session.
+        """Open questions (forms) and permission requests of one session.
 
-        Both keep the session ``busy`` although it waits for us; without this a
-        waiter would run into its timeout.
+        Both keep the session active although it waits for us; without this a
+        waiter would run into its timeout. One question per form field: the
+        question tool turns each question into a field ``q0``, ``q1``, ...
         """
         out = []
-        for item in self.get("/question") or []:
-            if item.get("sessionID") != session:
-                continue
-            for q in item.get("questions", []):
-                out.append({"kind": "question", "id": item["id"], "text": q.get("question", ""),
-                            "header": q.get("header", ""),
-                            "options": [o.get("label", "") for o in q.get("options", [])],
-                            "multiple": bool(q.get("multiple"))})
-        for item in self.get("/permission") or []:
-            if item.get("sessionID") == session:
-                out.append({"kind": "permission", "id": item["id"], "text": item.get("permission", ""),
-                            "patterns": item.get("patterns", [])})
+        for form in self.data(f"/api/session/{session}/form") or []:
+            for field in form.get("fields") or []:
+                out.append({"kind": "question", "id": form["id"], "key": field.get("key"),
+                            "text": field.get("description") or field.get("title", ""),
+                            "header": field.get("title", ""),
+                            "options": [o.get("label", "") for o in field.get("options") or []],
+                            "multiple": field.get("type") == "multiselect"})
+        for req in self.data(f"/api/session/{session}/permission") or []:
+            # OpenCode 2 splits a compound command into its parts (measured: `a && b` -> ["a", "b"]).
+            res = req.get("resources") or []
+            out.append({"kind": "permission", "id": req["id"], "patterns": res,
+                        "text": f"{req.get('action', '')}: {' | '.join(res)}" if res else req.get("action", "")})
         return out
 
-    def messages(self, session: str, timeout: float = 5) -> List[Dict[str, Any]]:
-        return self.get(f"/session/{session}/message", timeout=timeout) or []
+    def messages(self, session: str, limit: int = 200, timeout: float = 5) -> List[Dict[str, Any]]:
+        """The newest ``limit`` messages, oldest first (the API sends newest first)."""
+        return list(reversed(self.data(f"/api/session/{session}/message?limit={limit}", timeout=timeout) or []))
 
-    def todos(self, session: str) -> List[Dict[str, Any]]:
-        return self.get(f"/session/{session}/todo") or []
-
-    def children(self, session: str) -> List[Dict[str, Any]]:
-        return self.get(f"/session/{session}/children") or []
+    def info(self, session: str) -> Dict[str, Any]:
+        """Session header: cost, model, outcome and ``time.updated`` - cheap."""
+        return self.data(f"/api/session/{session}") or {}
 
 
 def worker_of(job: Dict[str, Any]) -> Worker:
-    return Worker(int(job.get("port") or os.environ.get("OC_PORT", 4096)), job["dir"])
+    return Worker(int(job.get("port") or 4096), job["dir"], job.get("password") or "")
 
 
 # --------------------------------------------------------------------------- processes
@@ -366,53 +374,68 @@ def claude_pid() -> Optional[int]:
 CACHE_DIR = os.path.join(STATE_DIR, "cache")
 
 
+def _tools(msg: Dict[str, Any]) -> List[Dict[str, Any]]:
+    return [c for c in msg.get("content") or [] if c.get("type") == "tool"]
+
+
 def last_activity(msgs: List[Dict[str, Any]], directory: str) -> str:
     """Most recent meaningful tool call, e.g. ``edit: src/app.js``."""
     for msg in reversed(msgs):
-        if msg.get("info", {}).get("role") != "assistant":
+        if msg.get("type") != "assistant":
             continue
-        for part in reversed(msg.get("parts", [])):
-            if part.get("type") != "tool":
-                continue
-            inp = part.get("state", {}).get("input", {}) or {}
-            target = inp.get("command") or inp.get("filePath") or inp.get("description") or inp.get("pattern") or ""
+        for tool in reversed(_tools(msg)):
+            inp = (tool.get("state") or {}).get("input") or {}
+            target = inp.get("command") or inp.get("path") or inp.get("filePath") or inp.get("pattern") \
+                or inp.get("description") or ""
             if target:
-                return f"{part.get('tool')}: {str(target).replace(directory + '/', '')}"[:90]
+                return f"{tool.get('name')}: {str(target).replace(directory + '/', '')}"[:90]
     return ""
 
 
-def final_report(msgs: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Text, error and cost of the last assistant turn, cost summed over the session."""
-    assistant = [m for m in msgs if m.get("info", {}).get("role") == "assistant"]
-    cost = sum(float(m["info"].get("cost") or 0) for m in assistant)
-    if not assistant:
-        return {"text": "", "error": None, "cost": cost, "model": None}
-    last = assistant[-1]
-    text = "\n".join(p.get("text", "") for p in last.get("parts", []) if p.get("type") == "text")
-    info = last["info"]
-    model = info.get("modelID") or (info.get("model") or {}).get("modelID")
-    return {"text": text, "error": info.get("error"), "cost": cost, "model": model}
+def final_report(msgs: List[Dict[str, Any]], info: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    """Text and error of the last turn; cost and model from the session header.
+
+    A turn ends with an ``idle`` message whose ``outcome`` is succeeded, failed
+    or interrupted (measured on 2.1.4). The error sits on that message and on
+    the assistant message that failed.
+    """
+    info = info or {}
+    cost = float(info.get("cost") or 0)
+    model = (info.get("model") or {}).get("id")
+    assistant = [m for m in msgs if m.get("type") == "assistant"]
+    idle = [m for m in msgs if m.get("type") == "idle"]
+    text = ""
+    if assistant:
+        text = "\n".join(c.get("text", "") for c in assistant[-1].get("content") or [] if c.get("type") == "text")
+        model = model or (assistant[-1].get("model") or {}).get("id")
+    error = None
+    last_idle = idle[-1] if idle else None
+    if last_idle and (not assistant or last_idle["time"]["created"] >= assistant[-1]["time"]["created"]):
+        if last_idle.get("outcome") == "failed":
+            error = last_idle.get("error") or (assistant[-1].get("error") if assistant else None) or "failed"
+        elif last_idle.get("outcome") == "interrupted":
+            error = {"type": "interrupted", "message": "the turn was interrupted"}
+    return {"text": text, "error": error, "cost": cost, "model": model}
 
 
 def error_text(err: Any) -> str:
-    """Short, readable form of an OpenCode message error."""
+    """Short, readable form of an OpenCode error (``{type, message}``)."""
     if not err:
         return ""
     if isinstance(err, dict):
-        data = err.get("data") or {}
-        msg = data.get("message") if isinstance(data, dict) else None
-        return f"{err.get('name', 'Error')}: {msg}" if msg else str(err.get("name", "Error"))
+        msg = err.get("message")
+        return f"{err.get('type', 'error')}: {msg}"[:300] if msg else str(err.get("type", "error"))
     return str(err)[:200]
 
 
 def session_summary(w: Worker, sid: str, directory: str) -> Dict[str, Any]:
     """Cost, model, last error and activity of a session - cached.
 
-    The full message list of a long job runs into megabytes, and status lines
-    ask every few seconds. ``GET /session/<id>`` is cheap and carries
-    ``time.updated``; the messages are only fetched again when that changed.
+    The message list of a long job is large, and status lines ask every few
+    seconds. The session header is cheap and carries ``time.updated``; the
+    messages are only fetched again when that changed.
     """
-    info = w.get(f"/session/{sid}") or {}
+    info = w.info(sid)
     updated = (info.get("time") or {}).get("updated")
     path = os.path.join(CACHE_DIR, sid + ".json")
     if updated:
@@ -424,8 +447,8 @@ def session_summary(w: Worker, sid: str, directory: str) -> Dict[str, Any]:
         except (OSError, ValueError):
             pass
     msgs = w.messages(sid, timeout=10)
-    rep = final_report(msgs)
-    stamps = [(m.get("info", {}).get("time") or {}) for m in msgs]
+    rep = final_report(msgs, info)
+    stamps = [(m.get("time") or {}) for m in msgs]
     last_ms = max([t.get("completed") or t.get("created") or 0 for t in stamps] or [0])
     summary = {"updated": updated or last_ms, "cost": rep["cost"], "model": rep["model"],
                "error": error_text(rep["error"]), "activity": last_activity(msgs, directory),
@@ -474,13 +497,12 @@ def job_status(job: Dict[str, Any], detail: bool = False) -> Dict[str, Any]:
         return st
     st["pending"] = w.pending(sid)
     busy = w.busy(sid)
-    todos = w.todos(sid)
-    st["todo_done"] = sum(1 for t in todos if t.get("status") == "completed")
-    st["todo_total"] = len(todos)
     idle = not st["pending"] and not busy
     if busy and not detail:
-        # Cheap: only the session header, for stall detection.
-        st["updated"] = ((w.get(f"/session/{sid}") or {}).get("time") or {}).get("updated")
+        # Cheap: only the session header, for stall detection and cost.
+        info = w.info(sid)
+        st["updated"] = (info.get("time") or {}).get("updated")
+        st["cost"] = float(info.get("cost") or 0)
     if detail or idle:
         summ = session_summary(w, sid, job["dir"])
         st.update({"cost": summ["cost"], "model": summ["model"], "activity": summ["activity"],
@@ -528,7 +550,7 @@ def opencode_setup() -> Dict[str, Any]:
     """
     cfg = _load_jsonc(os.path.join(OPENCODE_CONFIG_DIR, "opencode.jsonc")) \
         or _load_jsonc(os.path.join(OPENCODE_CONFIG_DIR, "opencode.json")) or {}
-    plugins = [p if isinstance(p, str) else str(p) for p in cfg.get("plugin", [])]
+    plugins = config_plugins(cfg)
     omo = None
     for name in ("oh-my-opencode-slim.json", "oh-my-opencode-slim.jsonc", "oh-my-opencode.json", "oh-my-opencode.jsonc"):
         omo = _load_jsonc(os.path.join(OPENCODE_CONFIG_DIR, name))
@@ -540,7 +562,7 @@ def opencode_setup() -> Dict[str, Any]:
         for name, val in ((omo.get("presets") or {}).get(preset) or omo.get("agents") or {}).items():
             val = val or {}
             agents[name] = val.get("model", "?") if isinstance(val, dict) else str(val)
-    for name, val in (cfg.get("agent") or {}).items():
+    for name, val in (cfg.get("agents") or cfg.get("agent") or {}).items():
         if isinstance(val, dict) and not val.get("disable"):
             agents.setdefault(name, val.get("model", "default"))
     omo_installed = any("oh-my-opencode" in p for p in plugins)
@@ -615,7 +637,12 @@ def default_agent(omo_installed: Optional[bool] = None) -> str:
 def opencode_setup_plugins() -> List[str]:
     cfg = _load_jsonc(os.path.join(OPENCODE_CONFIG_DIR, "opencode.jsonc")) \
         or _load_jsonc(os.path.join(OPENCODE_CONFIG_DIR, "opencode.json")) or {}
-    return [p if isinstance(p, str) else str(p) for p in cfg.get("plugin", [])]
+    return config_plugins(cfg)
+
+
+def config_plugins(cfg: Dict[str, Any]) -> List[str]:
+    """Plugins of an OpenCode config; OpenCode 2 reads ``plugins`` and still the 1.x key ``plugin``."""
+    return [p if isinstance(p, str) else str(p) for p in (cfg.get("plugins") or cfg.get("plugin") or [])]
 
 
 def opencode_bin() -> str:
@@ -640,20 +667,22 @@ def opencode_major(version: Optional[str]) -> Optional[int]:
     return int(m.group(1)) if m else None
 
 
-OPENCODE_2_UNSUPPORTED = ("This OpenCode ({version}) is not supported yet - oc-connect needs OpenCode 1.x "
-                          "(OpenCode 2 has a new server API). The 1.x installer: "
-                          "https://opencode.ai/install")
+OPENCODE_1_UNSUPPORTED = ("This OpenCode ({version}) is OpenCode 1 - oc-connect 2.x needs OpenCode 2 "
+                          "(https://opencode.ai/v2/install). For OpenCode 1 install oc-connect 1.x: "
+                          "claude plugin marketplace add jonaandresen/oc-connect#v1")
 
 
-def require_opencode_1() -> None:
-    """Refuse OpenCode 2 with a clear message instead of an HTTP error.
+def require_opencode_2() -> None:
+    """Refuse OpenCode 1 with a clear message instead of an HTTP error.
 
-    Measured on 2.0.29: the server moved to ``/api/...`` behind a password,
-    so the first call (``POST /session``) fails with 405.
+    OpenCode 1 serves an older API without ``/api`` and without a password;
+    oc-connect 1.x (branch ``v1``) speaks it. An unknown version passes - the
+    first API call tells.
     """
     version = _opencode_version()
-    if (opencode_major(version) or 0) >= 2:
-        raise OcError(OPENCODE_2_UNSUPPORTED.format(version=version))
+    major = opencode_major(version)
+    if major is not None and major < 2:
+        raise OcError(OPENCODE_1_UNSUPPORTED.format(version=version))
 
 
 def _opencode_version() -> Optional[str]:

@@ -20,7 +20,6 @@ You are a builder working for a lead developer (Claude). The lead researched the
 - For every fix, do a defeat test by hand: temporarily undo the core change (without git stash), confirm the test fails, restore.
 - Keep the diff focused on the task. No drive-by refactors, no reformatting of untouched code.
 - Match the surrounding code: naming, comment density and language, idioms.
-- Keep a todo list with the todo tool, so the lead can see your progress.
 
 # Before you report done
 

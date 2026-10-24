@@ -53,8 +53,9 @@ def cmd_status(args: argparse.Namespace) -> int:
 def cmd_setup(_: argparse.Namespace) -> int:
     s = core.opencode_setup()
     print(f"opencode: {s['opencode'] or 'NOT FOUND'} {s['version'] or ''}".rstrip())
-    if (core.opencode_major(s["version"]) or 0) >= 2:
-        print("WARNING: " + core.OPENCODE_2_UNSUPPORTED.format(version=s["version"]))
+    major = core.opencode_major(s["version"])
+    if major is not None and major < 2:
+        print("WARNING: " + core.OPENCODE_1_UNSUPPORTED.format(version=s["version"]))
     print(f"plugins: {', '.join(s['plugins']) or 'none'}")
     print(f"oh-my-opencode: {'yes' if s['oh_my_opencode'] else 'no (optional)'}"
           f"   superpowers: {'yes' if s['superpowers'] else 'no'}")
@@ -140,6 +141,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("board-tab", help="open the live board in a new tab")
     sub.add_parser("mcp", help="run the MCP server on stdio (used by Claude Code)")
     sub.add_parser("monitor", help="print one line per job event (used by Claude Code)")
+    s = sub.add_parser("tab", help="run a job's worker - OpenCode server and TUI (runs in its tab)")
+    s.add_argument("slug")
     s = sub.add_parser("reap", help="stop a worker once Claude no longer uses it (runs in its tab)")
     s.add_argument("slug")
     s.add_argument("pid", type=int)
@@ -220,6 +223,8 @@ def main(argv=None) -> int:
         elif args.cmd == "monitor":
             from . import monitor
             monitor.main()
+        elif args.cmd == "tab":
+            return ops.tab_main(args.slug)
         elif args.cmd == "reap":
             from . import reaper
             reaper.main(args.slug, args.pid, args.idle_seconds)

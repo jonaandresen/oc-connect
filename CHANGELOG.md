@@ -1,5 +1,20 @@
 # Changelog
 
+## 2.0.0
+
+For OpenCode 2 (tested with 2.1.4). OpenCode 1 users stay on oc-connect 1.x (branch `v1`); this version refuses OpenCode 1 with a pointer there.
+
+OpenCode 2 is a new program behind the same name: its server API moved to `/api` behind a password, questions became forms, the TUI attaches to a server instead of being one. Everything that talks to OpenCode was rewritten and re-measured; the Claude side (MCP tools, monitor, status rows, hooks, review gate, snapshots) is unchanged.
+
+- **One server per job, in the job's tab.** `oc tab` (started by the tab) runs `opencode serve` on the job's port with a password of the job's own and the worker's environment, creates the session, and attaches the TUI with `--server`. Both stay in the tab's terminal, so session trackers still find the job's tab; closing the tab, the reaper, `close` and `done` stop server and TUI together.
+- **The guard goes onto every session** (`permissions` at creation) as well as into the worker's config and `OPENCODE_CONFIG`. Rules are OpenCode 2's list - the last matching rule wins (measured). The guard file in the state dir may still be in the 1.x format; it is converted on the fly.
+- **Second guard layer re-proven:** the server's environment reaches every shell command, so the push and docker block works as before. `oc selftest` on 2.1.4: direct push and docker blocked by the guard, indirect forms by the environment, nothing reached the remote.
+- OpenCode 2 splits compound commands (`a && b`) and checks each part - a push hidden behind `cd x &&` now meets the guard too. Permission requests show every part.
+- Questions are OpenCode 2 forms; `answer` maps one answer to each field, a multiselect answer becomes a list.
+- The worker profile's agents carry no model: OpenCode 2 silently drops an agent whose config names one (every notation tried). The model goes onto the job's session instead. The TUI keeps the user's `cli.json` plugins (session trackers), without oh-my-opencode.
+- No todo progress: OpenCode 2 has no todo tool. Status rows show the last activity instead.
+- Cost comes from the session header, which is cheap to read while the worker runs.
+
 ## 1.0.0
 
 First public release, for OpenCode 1.x. From here on the major version follows OpenCode's: oc-connect 1.x for OpenCode 1 (branch `v1`), 2.x for OpenCode 2 (`main`).

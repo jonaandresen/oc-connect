@@ -6,15 +6,17 @@ agents that are *subagents*, so the TUI cannot select them) and superpowers
 (brainstorming that stops to ask for approval) work against a worker that got
 a finished plan from Claude.
 
-How, measured on OpenCode 1.18:
-  * ``OPENCODE_CONFIG`` / ``OPENCODE_CONFIG_CONTENT`` are MERGED into the global
-    config - an empty ``plugin`` list does not unload oh-my-opencode.
-  * ``OPENCODE_CONFIG_DIR`` adds a directory, it does not replace the global one.
-  * ``--pure`` drops ALL external plugins, including the Vibe Island / Open
-    Island plugin files - session trackers would lose the workers.
+How (measured on OpenCode 1.18, re-checked on 2.1.4):
+  * ``OPENCODE_CONFIG`` is MERGED into the global config - it cannot unload a
+    plugin. ``--pure`` would drop session trackers as well.
   * ``XDG_CONFIG_HOME`` pointing to a directory of our own replaces the global
-    config. Plugin FILES placed in its ``opencode/plugins`` still load, and
-    logins survive because they live in the data dir, not the config dir.
+    config. Plugins placed in its ``opencode/plugins`` still load, and logins
+    survive because they live in the data dir, not the config dir.
+  * OpenCode 2 drops an agent whose config names a model - silently, in every
+    notation tried (``provider/model``, ``{providerID, id}``). So the agents here
+    carry no model; the job's model is set on its session instead.
+  * The TUI reads ``cli.json`` (its own plugins, e.g. a session tracker's TUI
+    part); the worker home gets the user's, without oh-my-opencode.
 
 ``XDG_CONFIG_HOME`` also moves the config of every other tool the worker runs
 (gh, git, ...). So the worker home mirrors every entry of ``~/.config`` as a
@@ -28,7 +30,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from . import core
 
@@ -44,9 +46,11 @@ AGENTS = {
     "oc-strong": {"role": "orchestrator", "description": "Larger work across several files."},
     "oc-ui": {"role": "designer", "description": "User interface and styling."},
 }
-# Settings of the user's global config that a worker needs as well.
-CARRY = ("provider", "model", "small_model", "mcp", "lsp", "formatter", "disabled_providers",
+# Settings of the user's global config that a worker needs as well (1.x and 2.x key names:
+# OpenCode 2 still reads a 1.x config).
+CARRY = ("provider", "providers", "model", "small_model", "mcp", "lsp", "formatter", "disabled_providers",
          "enabled_providers")
+SKIP_PLUGIN = ("oh-my-opencode", "node_modules", "package.json", "package-lock.json")
 
 
 def mode() -> str:
@@ -75,24 +79,33 @@ def agent_models() -> Dict[str, Optional[str]]:
     return {name: omo.get(spec["role"]) or fallback for name, spec in AGENTS.items()}
 
 
-def build_config() -> Dict[str, Any]:
+def build_config(guard: Optional[List[Dict[str, str]]] = None) -> Dict[str, Any]:
+    """The worker's ``opencode.json`` in OpenCode 2's format.
+
+    ``guard`` are the permission rules every worker runs with (see
+    ``ops.guard_rules``); they go here as well as onto each session, so a
+    session opened by hand in the worker's tab is guarded too.
+    """
     user = _user_config()
-    cfg: Dict[str, Any] = {"$schema": "https://opencode.ai/config.json", "autoupdate": False,
+    cfg: Dict[str, Any] = {"$schema": "https://opencode.ai/config.json", "update": "disable",
                            "default_agent": "oc-fast"}
     for key in CARRY:
         if key in user:
             cfg[key] = user[key]
-    # The question tool exists but is off unless permitted (measured: without
-    # this the worker said "there is no question tool" and stopped). Push,
-    # docker & co. are handled by the guard (OPENCODE_CONFIG) on top.
-    cfg["permission"] = {"question": "allow"}
-    prompt = "{file:" + os.path.join(PLUGIN_ROOT, "templates", "worker-prompt.md") + "}"
-    cfg["agent"] = {}
-    for name, model in agent_models().items():
-        agent: Dict[str, Any] = {"mode": "primary", "description": AGENTS[name]["description"], "prompt": prompt}
-        if model:
-            agent["model"] = model
-        cfg["agent"][name] = agent
+    # The question tool must be allowed explicitly (measured on 1.x: without it
+    # the worker said "there is no question tool" and stopped).
+    cfg["permissions"] = [{"action": "question", "resource": "*", "effect": "allow"}] + list(guard or [])
+    with open(os.path.join(PLUGIN_ROOT, "templates", "worker-prompt.md")) as fh:
+        prompt = fh.read()
+    cfg["agents"] = {name: {"mode": "primary", "description": spec["description"], "system": prompt}
+                     for name, spec in AGENTS.items()}
+    return cfg
+
+
+def _user_cli_config() -> Dict[str, Any]:
+    cfg = core._load_jsonc(os.path.join(core.OPENCODE_CONFIG_DIR, "cli.json")) or {}
+    if isinstance(cfg.get("plugins"), list):
+        cfg["plugins"] = [p for p in cfg["plugins"] if "oh-my-opencode" not in str(p)]
     return cfg
 
 
@@ -106,7 +119,7 @@ def _replace_link(link: str, target: str) -> None:
     os.symlink(target, link)
 
 
-def ensure_home() -> str:
+def ensure_home(guard: Optional[List[Dict[str, str]]] = None) -> str:
     """Create or refresh the worker home; returns the value for XDG_CONFIG_HOME.
 
     Refreshed on every job start, so new tools in ``~/.config`` and changes to
@@ -130,16 +143,25 @@ def ensure_home() -> str:
     src_plugins = os.path.join(core.OPENCODE_CONFIG_DIR, "plugins")
     present = set()
     if os.path.isdir(src_plugins):
-        # Plugin FILES are session trackers and the like - keep them.
+        # Local plugins are session trackers and the like - keep them, files and
+        # plugin folders (a tracker's TUI part), but no oh-my-opencode.
         for name in os.listdir(src_plugins):
-            if name.endswith((".js", ".ts", ".mjs")):
+            src = os.path.join(src_plugins, name)
+            if any(skip in name for skip in SKIP_PLUGIN) or name.startswith("."):
+                continue
+            if os.path.isdir(src) or name.endswith((".js", ".ts", ".mjs")):
                 present.add(name)
-                _replace_link(os.path.join(plugins, name), os.path.join(src_plugins, name))
+                _replace_link(os.path.join(plugins, name), src)
     for name in os.listdir(plugins):
         if name not in present:
-            os.remove(os.path.join(plugins, name))
-    tmp = os.path.join(oc_dir, "opencode.json.tmp")
-    with open(tmp, "w") as fh:
-        json.dump(build_config(), fh, indent=2)
-    os.replace(tmp, os.path.join(oc_dir, "opencode.json"))
+            path = os.path.join(plugins, name)
+            if os.path.islink(path) or os.path.isfile(path):
+                os.remove(path)
+            else:
+                shutil.rmtree(path)
+    for name, content in (("opencode.json", build_config(guard)), ("cli.json", _user_cli_config())):
+        tmp = os.path.join(oc_dir, name + ".tmp")
+        with open(tmp, "w") as fh:
+            json.dump(content, fh, indent=2)
+        os.replace(tmp, os.path.join(oc_dir, name))
     return HOME

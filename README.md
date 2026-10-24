@@ -3,13 +3,13 @@
 **Claude Code as the lead, OpenCode as the workers.**
 
 [![Release](https://img.shields.io/github/v/release/jonaandresen/oc-connect?sort=semver)](https://github.com/jonaandresen/oc-connect/releases)
-[![OpenCode](https://img.shields.io/badge/OpenCode-1.x-orange)](https://opencode.ai)
+[![OpenCode](https://img.shields.io/badge/OpenCode-2.x-orange)](https://opencode.ai)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 Claude Code plans, writes a precise task and reviews. [OpenCode](https://opencode.ai) implements it on a cheaper model, in its own git worktree and its own terminal tab you can watch live. Claude answers the worker's questions (and passes on only the ones that are really yours), then reads the full diff, runs the checks and does a defeat test before anything is committed.
 
 <p align="center"><img src="docs/demo.gif" alt="Claude Code delegates a task to an OpenCode worker, the worker implements it in its own window, Claude reviews the diff, breaks the code on purpose to see the tests fail, and lists the gaps it found" width="900"></p>
-<p align="center"><sub>A real run, unedited apart from 2× speed: Claude Code (Sonnet) delegates, you confirm, an OpenCode 1.19.4 worker on a free model implements it in its own window, Claude reviews - including its own defeat test - and names the gaps.</sub></p>
+<p align="center"><sub>A real run, unedited apart from 2× speed: Claude Code (Sonnet) delegates, you confirm, an OpenCode 2 worker on a free model implements it in its own window, Claude reviews - including its own defeat test - and names the gaps.</sub></p>
 
 ```
 you ──► Claude Code (lead) ──task──► OpenCode worker (tab "OC 276", port 4101, worktree ../repo-worktrees/276)
@@ -35,7 +35,7 @@ you ──► Claude Code (lead) ──task──► OpenCode worker (tab "OC 27
 ## Requirements
 
 - Claude Code ≥ 2.1.271
-- [OpenCode](https://opencode.ai) 1.x (≥ 1.18, tested up to 1.19.4) with a configured provider; `curl -fsSL https://opencode.ai/install | bash` installs it. For **OpenCode 2** use oc-connect 2.x (`main`): OpenCode 2 has a new server API, and this version refuses it with a clear message. With both installed, point `OC_OPENCODE` to the 1.x binary.
+- [OpenCode](https://opencode.ai) **2.x** (tested with 2.1.4) with a configured provider; `curl -fsSL https://opencode.ai/v2/install | bash` installs it. For **OpenCode 1** use oc-connect 1.x (see [Versions](#versions)) - OpenCode 1 speaks an older API, and this version refuses it with a clear message. With both installed, point `OC_OPENCODE` to the one you want.
 - `python3` ≥ 3.9 (ships with macOS), `git`
 - A terminal that can open tabs: tmux (anywhere), WezTerm, kitty, iTerm2 or Terminal.app. **Terminal.app** needs *System Settings → Privacy & Security → Accessibility → Terminal*; without it workers open in windows.
 - Optional: [oh-my-opencode-slim](https://github.com/alvinunreal/oh-my-opencode-slim), [superpowers](https://github.com/obra/superpowers)
@@ -46,13 +46,13 @@ The major version follows OpenCode's:
 
 | oc-connect | OpenCode | Branch |
 |---|---|---|
-| **1.x** (this branch) | 1.x | `v1` |
-| 2.x | 2.x | `main`, `v2` |
+| **2.x** (this branch) | 2.x | `main`, `v2` |
+| 1.x | 1.x | [`v1`](https://github.com/jonaandresen/oc-connect/tree/v1) - install with `claude plugin marketplace add jonaandresen/oc-connect#v1` |
 
 ## Install
 
 ```bash
-claude plugin marketplace add jonaandresen/oc-connect#v1
+claude plugin marketplace add jonaandresen/oc-connect
 claude plugin install oc@oc-connect
 ```
 
@@ -108,7 +108,7 @@ The gate covers the `delegate` tool and `oc start` run through Bash.
 |---|---|---|
 | `OC_AGENT` | `oc-fast` | Default agent |
 | `OC_PROFILE` | `isolated` | `inherit` runs workers with your own OpenCode setup instead of the worker profile |
-| `OC_OPENCODE` | `opencode` on PATH | Path of the OpenCode binary, e.g. a 1.x install next to OpenCode 2 |
+| `OC_OPENCODE` | `opencode` on PATH | Path of the OpenCode binary, e.g. when OpenCode 1 and 2 are both installed |
 | `OC_MODEL` | agent's own model | `provider/model` override |
 | `OC_WT_ROOT` | `<repo>-worktrees` | Where worktrees go |
 | `OC_BASE_REF` | `origin/HEAD` | Where jobs branch from |
@@ -126,15 +126,16 @@ The gate covers the `delegate` tool and `oc start` run through Bash.
 
 ## Good to know
 
-- **How the worker profile works.** OpenCode merges `OPENCODE_CONFIG` into your global config, so plugins cannot be removed that way; `--pure` would also drop session-tracker plugins. oc-connect points the worker's `XDG_CONFIG_HOME` to its own directory (`~/.local/state/oc-connect/worker-home`) with a generated `opencode.json`, your plugin *files* and a symlink for every other entry of `~/.config` (so `gh`, `git` and friends keep their config). Logins live in OpenCode's data dir and are unaffected.
+- **How a worker runs.** OpenCode 2's TUI attaches to a server instead of being one. Each job's tab therefore runs `oc tab`: it starts `opencode serve` on the job's port, with a password of the job's own and the worker's environment, creates the session with agent, model and guard, and attaches the TUI (`opencode --server … --session …`). Server and TUI live in the tab's terminal and stop together.
+- **How the worker profile works.** OpenCode merges `OPENCODE_CONFIG` into your global config, so plugins cannot be removed that way; `--pure` would also drop session-tracker plugins. oc-connect points the worker's `XDG_CONFIG_HOME` to its own directory (`~/.local/state/oc-connect/worker-home`) with a generated `opencode.json`, your local plugins, your `cli.json` without oh-my-opencode, and a symlink for every other entry of `~/.config` (so `gh`, `git` and friends keep their config). Logins live in OpenCode's data dir and are unaffected. The agents there carry no model - OpenCode 2 drops agents that name one - so the job's model is set on its session.
 - **Cost on flat-rate providers.** OpenCode Go reports a per-message cost (measured: $0.01 for a small job on deepseek-v4.1-flash), so `OC_BUDGET` fires there as well - but that number is not what a subscription actually charges you. The limit that matters then is the provider's usage quota, which oc-connect cannot read.
-- **Typing in a worker tab** goes to the agent shown at the bottom of that tab. With the worker profile that is the job's agent; with `OC_PROFILE=inherit` it is your default agent (e.g. oh-my-opencode's orchestrator), not the job's subagent.
-- **Subagents as job agents (inherit mode).** oh-my-opencode's `fixer` and `designer` are OpenCode *subagents*. `opencode --agent fixer` fails for them, but the HTTP API accepts them, so the job's agent goes with every prompt.
+- **Typing in a worker tab** goes into the job's session, with the job's agent.
+- **The guard and OpenCode 2's code mode.** OpenCode 2 gives models an `execute` tool that runs JavaScript against other tools. Shell commands are not reachable from it (measured: a model tried several ways and failed), but OpenCode's own worktree tools are, and a permission rule on them did not apply inside `execute`. Those cannot push; the worker prompt forbids them.
 - **Why a tab per job.** Trackers like Vibe Island find a session's terminal by walking up from the OpenCode process to the first TTY. A shared background server made all jobs look like one session with no tab to jump to.
 - **Tabs close themselves.** A reaper beside each worker stops it once the job has been idle for `OC_IDLE_CLOSE_MIN` minutes, or two minutes after its Claude session ended without another session taking the job over (a restart of Claude Code is fast enough). A busy or asking worker is never stopped. Worktree and session stay; `send` or `open` bring the worker back in the same session. Reading a finished job in its tab for longer than the limit closes it - raise the limit if you like to linger.
 - **Terminal.app keeps dead tabs** with their device name, and the next tab can reuse it; trackers then jumped into the dead tab. oc-connect records the window id of every tab it opens and closes those tabs once nothing runs in them. (Matching by title does not work: OpenCode sets its own title and resets it to "Terminal" on exit.)
 - **Terminal.app lists every tab as its own window** in AppleScript. oc-connect therefore opens a tab via the Shell menu and writes the worker command only into a window id that did not exist before. An earlier version wrote into "the selected tab of the front window" - when opening the tab failed, that was the tab running Claude Code.
-- **The tab opens straight into the job's session.** The session is created first by a short-lived server; switching a running TUI to a session afterwards was unreliable and left the tab on the start screen.
+- **The tab opens straight into the job's session**: `oc tab` creates it before the TUI starts.
 - **No agent-panel row.** Only subagents get a custom row in Claude Code's agent panel, and subagents are model calls. A Haiku watcher was tried for it and misreported the job state (it summarised although told to pass the output through), and the panel setting from the plugin did not run. Status rows and the monitor need no model.
 - **Monitors are experimental** in Claude Code and run only in interactive sessions. Without them Claude uses `oc wait` in the background.
 - **Review stays Claude's job.** In real use the workers were fast and formally clean, but checked "nothing else broke" only with existing tests. The gaps were found in Claude's review.

@@ -8,7 +8,7 @@ Claude Code plugin: Claude is the lead, OpenCode workers implement. What it does
 python3 -m unittest discover tests          # fake OpenCode server, no model; must pass on /usr/bin/python3 (3.9) too
 /usr/bin/python3 -m unittest discover tests
 claude plugin validate --strict .
-bin/oc selftest --model opencode-go/deepseek-v4.1-flash   # real OpenCode: both guard layers, throw-away repo
+bin/oc selftest --model opencode/deepseek-v4.1-flash-free   # real OpenCode 2: both guard layers, throw-away repo
 ```
 
 Ship: commit (no Claude/AI signature lines), `git push`, then
@@ -34,11 +34,23 @@ Rules for changes:
 - A provider error ends the turn without parts: `POST /session/<id>/message` returns `info.error = {name: "APIError", data: {message, statusCode}}` (measured 1.19.4, expired key). `ops.turn_error()` reads it.
 - A flat-rate provider (OpenCode Go) DOES report a cost per message: $0.01 for a small job on `deepseek-v4.1-flash` (measured 2026-09-20). The earlier claim of cost 0 was wrong. What the number is worth is another question - a subscription does not charge per message.
 
-**OpenCode 2 (measured 2.0.29, 2026-10-24) - not supported yet**
-- `opencode.ai/install` still installs 1.x (1.19.4 on 2026-10-24); 2.x comes from `opencode.ai/v2/install` / npm `@opencode/cli-<platform>`.
-- `opencode serve` prints a password; the API needs HTTP basic auth (user `opencode`), routes live under `/api/...`, the OpenAPI spec is `/openapi.json` ("Experimental HttpApi", 0.0.1). `POST /session` (v1 path) answers 405.
-- Changed for us: prompt is `POST /api/session/<id>/prompt`; questions are "forms" (`/api/session/<id>/form/<id>/reply`); permissions `/api/session/<id>/permission/...`; TUI flags are `--server`/`--standalone`/`--session` (no `--port`), a background service is the default; config keys are `plugins`, `providers`, `agents` and `permissions` as a list.
-- Not yet re-measured on 2.x: worker profile via `XDG_CONFIG_HOME`, guard matching, tab-per-job and Vibe Island tracking.
+**OpenCode 2 (measured on 2.1.4, 2026-10-24) - what 2.x is built on**
+- `opencode.ai/install` still installs 1.x (1.19.4 on 2026-10-24); 2.x comes from `opencode.ai/v2/install` / npm `@opencode/cli-<platform>`. Branch `v1` (oc-connect 1.x) keeps OpenCode 1.
+- `opencode serve --port P` prints a password unless `OPENCODE_SERVER_PASSWORD` sets one; the API needs HTTP basic auth (user `opencode`), routes live under `/api`, the OpenAPI spec is `/openapi.json` ("Experimental HttpApi" 0.0.1). `/doc` and every unknown path serve the web UI. The v1 path `POST /session` answers 405.
+- The TUI has no `--port`: it attaches with `--server URL` (the password from `OPENCODE_SERVER_PASSWORD` in its env works) and `--session ID` opens that session directly. Hence `oc tab`: server + TUI as children of one process in the tab.
+- `POST /api/session` takes `title`, `agent`, `model` (`{providerID, id}`) and `permissions` (a rule list) - the guard sits on the session. Session rules beat a config `shell * allow` (a session deny alone blocked).
+- Permission rules: a list of `{action, resource, effect}`; the LAST matching rule wins (allow-then-deny blocked `echo`, deny-then-allow ran it). Actions: `shell` (1.x `bash`), `subagent` (1.x `task`), `question`, `external_directory`, ... OpenCode 2 reads a 1.x config and translates it (`permission` -> `permissions`, `agent` -> `agents`, `plugin` -> `plugins`, `{file:...}` prompts -> `system` text).
+- `OPENCODE_CONFIG` is still merged (after the user's config); `XDG_CONFIG_HOME` still replaces the global config (only the worker profile loaded).
+- An agent whose config names a model is dropped silently - `"provider/model"`, `{providerID, id}`, `{providerID, modelID}` all tried; without `model` it loads. The model goes onto the session instead.
+- `POST /api/session/<id>/prompt {text}` returns at once (the message is queued); `GET /api/session/active` lists running sessions; `POST /api/experimental/session/<id>/wait` blocks until idle. A turn ends with an `idle` message: `outcome` succeeded / failed / interrupted, `error {type, message}` on failure.
+- Messages come newest first (`?limit=`); types user, assistant (`content`: text, reasoning, tool), idle, system. A tool is `{type: tool, name, state: {status, input, content: [{type: text, text}], metadata, error}}`. Shell output sits in `state.content`, the exit code in `state.metadata.exit`. A guard block is `status: error, error.type: permission.rejected`.
+- The session header (`GET /api/session/<id>`) carries `cost`, `model`, `outcome`, `time.updated` - cheap, read while running.
+- The question tool creates a form (`/api/session/<id>/form`): one field per question (`key` q0, q1, ...), `options` with label/value, `custom: true`. Reply `{"answer": {"q0": "HALF_EVEN"}}`; the model got the answer and used it. The session stays in `active` while a form is open.
+- Permission requests (`/api/session/<id>/permission`): `action`, `resources` - a compound command is split into its parts (`a && b` -> ["a", "b"]), each checked; reply `{"decision": once|always|reject}`.
+- There is no todo tool and no todo route any more.
+- Code mode: models get an `execute` tool (JavaScript against tools). The shell is not in its catalog (a model searched for it and tried Playwright's `browser_run_code_unsafe` - failed). OpenCode's own `opencode.worktree_list` ran through `execute` although a session rule denied that action; whether the action name was wrong or `execute` skips the rule is open.
+- Shell commands inherit the server process's environment - the second guard layer (git push URL, DOCKER_HOST) works as on 1.x (`oc selftest`).
+- Free models (`opencode/*-free`) need either no OpenCode account at all or a workspace that allows free endpoints (error `provider.invalid-request: ... Allow free endpoints in your workspace's Privacy settings`). For tests: `XDG_DATA_HOME` and `XDG_STATE_HOME` pointing to an empty directory = anonymous. In tmux, set them with `set-environment -g`: new windows do not inherit a pane's variables.
 
 **Terminal.app**
 - AppleScript lists every tab as its own window with one tab. A new tab is a new window id; "count of tabs" never grows.
@@ -60,7 +72,16 @@ Rules for changes:
 - Plugin `userConfig` reaches hooks as `CLAUDE_PLUGIN_OPTION_<KEY>` and the MCP server via `${user_config.KEY}` in `plugin.json` env (the latter measured; the hook variable is from the docs and not yet seen live). Shell-form hook commands reject `${user_config.*}`.
 - A plugin's `.mcp.json` is ALSO read as project config when you work in the plugin's own checkout, and `${CLAUDE_PLUGIN_ROOT}` is empty there: `ENOENT ... /bin/oc`, a second server named `opencode` stuck on "Pending approval". Since 0.6.0 the config lives in `plugin.json` (`mcpServers`, inline object - a path or `.mcp.json` also work).
 
-## Verification status (2026-09-22, version 0.8.0; 0.8.1 changes checked 2026-10-24)
+## Verification status of 2.0.0 (2026-10-24, OpenCode 2.1.4, Claude Code 2.1.310, tmux)
+
+Live, `opencode/deepseek-v4.1-flash-free`, anonymous (empty XDG data/state dir):
+- `oc selftest`: direct push and `docker ps` blocked by the guard, indirect forms by the environment, nothing reached the remote. One earlier run: the model ran `git remote -v` instead of `bash -c "git push"` - reported as NOT RUN, not as blocked.
+- CLI cycle in a scratch repo: `start` (tab with `oc tab`: server + TUI on the job's session, agent `oc-fast`, model on the session), two permission requests shown with every command part and answered with `permit`, worker report in the worker prompt's format, `report` snapshot, `close` (tab, TUI and server gone), `send` reopened the tab in the SAME session, a question form answered with `answer` - the worker implemented the answered option -, `review` unblocked the commit gate, `done` left no process behind.
+- A provider error (free endpoints not allowed for the logged-in workspace) showed as `failed` with the provider's message in `status` and in the selftest.
+- Claude Code with the plugin (`--plugin-dir`, docs/demo.gif): delegate skill, confirmation dialog, worker window, monitor events, Claude's review with its own defeat test, job row "ready for review".
+- Not re-checked on 2.x: Vibe Island / Open Island tracking of the job's tab (the TUI and the server both run in the tab's terminal, as trackers need), the reaper closing an idle worker live (its `close` path is the one `done` used; its decisions are unit-tested), Terminal.app windows (tmux only).
+
+## Verification status of 1.x (2026-09-22, version 0.8.0; 1.0.0 changes checked 2026-10-24)
 
 Verified end to end, in a real Claude Code session with the installed plugin:
 - MCP tools and instructions load; `answer` via MCP reached the worker; a wrong question id is refused.
@@ -86,7 +107,7 @@ Not yet seen live with the installed plugin (needs a restart): the delegate gate
 
 README demo (docs/demo.gif, 2026-10-24): recorded with asciinema in a tmux session (`claude --plugin-dir . --setting-sources project,local`, `OC_OPENCODE` = OpenCode 1.19.4, `OC_MODEL=opencode/deepseek-v4.1-flash-free`), rendered with `agg --speed 2`. Full cycle in one take: confirmation dialog, worker window, a permission request answered by Claude, monitor events, review with Claude's own defeat test.
 
-Unit tests: 81, green on Python 3.14 and 3.9.
+Unit tests (2.0.0): 86, green on Python 3.14 and 3.9.
 
 ## Open
 
@@ -95,5 +116,8 @@ Unit tests: 81, green on Python 3.14 and 3.9.
 3. **Quality of the worker profile.** Three real tasks were clean (see above): test-first, honest defeat test, no scope creep, an open decision asked instead of guessed. Still open: a task in a real project with real history, and a comparison with oh-my-opencode's orchestrator.
 4. **Terminals other than Terminal.app**: tmux verified (README demo, 2026-10-24: the worker opened as a tmux window, the job row showed under Claude's prompt). iTerm2, WezTerm and kitty are implemented but untested.
 5. **Agent panel row.** Would need a subagent (a model call) and the plugin's `subagentStatusLine` did not run. Parked unless Claude Code offers rows for non-model tasks.
-6. **OpenCode 2 support** is oc-connect 2.x on `main`/`v2`; this branch (`v1`) is 1.x for OpenCode 1 and gets fixes only. Port `core.Worker`, profile, guard, terminal launch and selftest to the 2.x API, then re-measure every OpenCode fact above. Decide then whether to use the official SDKs (TypeScript) instead of the hand-rolled API client.
+6. **Two lines.** 2.x (`main`, `v2`) for OpenCode 2, 1.x (`v1`) for OpenCode 1 - fixes only. A fix that concerns both goes into both branches.
 7. **Budget on flat-rate providers:** the cost per message is reported (see above), but it does not describe a subscription's real limit, and the provider quota is not readable.
+8. **OpenCode 2's API is "experimental"** (its own words, version 0.0.1). Re-run the selftest and a CLI cycle after every OpenCode 2 update; the facts above say which shapes oc-connect relies on.
+9. **Code mode:** whether permission rules apply to tools called inside `execute` is open (see the OpenCode 2 facts).
+10. **Official SDKs.** The MCP protocol and the OpenCode API are hand-rolled (standard library only). Worth revisiting if OpenCode 2's API keeps moving.

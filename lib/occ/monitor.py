@@ -43,7 +43,7 @@ def _pending_text(st: Dict[str, Any]) -> str:
             opts = f" [options: {' | '.join(p['options'])}]" if p["options"] else ""
             parts.append(f"asks [{p['id']}]: {p['text']}{opts}")
         else:
-            parts.append(f"requests permission [{p['id']}]: {p['text']} {' '.join(p['patterns'])}")
+            parts.append(f"requests permission [{p['id']}]: {p['text']}")
     return "; ".join(parts)
 
 
