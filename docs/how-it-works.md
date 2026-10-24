@@ -1,0 +1,40 @@
+# How oc-connect works
+
+The details behind the [README](../README.md). Configuration is in [configuration.md](configuration.md).
+
+## What each part does
+
+| | |
+|---|---|
+| **Claude always knows** | An MCP server gives every session the tools (`delegate`, `status`, `answer`, …) and the rules for when delegating is worth it. No need to remember a command. |
+| **You decide** | Default: every delegation needs your OK in Claude Code's confirmation dialog, which shows title, agent and task. A hook enforces it, not the model's good behaviour - it also works under `--dangerously-skip-permissions`. `/oc:mode` switches between `off`, `ask`, `mechanical` and `auto` at any time. Money, auth, security and open product decisions are never delegated. |
+| **Live in Claude Code** | Rows under your status line: `▶ 276  Orders after payment  ███████░░░ 14/18  15 files +169 -65  oc-fast  26m`, `? 301 asks: …`, `✗ 288 APIError: …`. |
+| **Push, not poll** | A background monitor tells Claude the moment a worker runs, asks something (with a question id), finishes, fails, stalls, gets expensive or dies. Each job belongs to the Claude session that started it, so two open sessions never answer the same question. |
+| **One job = one worktree = one tab = one process** | Session trackers such as **Vibe Island** and **Open Island** show every job separately, and a click jumps to its tab (verified with Vibe Island). Closing the tab stops the worker, and the tab closes itself once Claude no longer uses the job (idle, or its Claude session ended). |
+| **Two guard layers** | OpenCode's permission guard blocks `git commit/push/merge/stash`, `docker`, `ssh`, `gh pr merge`, `npm install` and more. Because it matches command strings (`bash -c "git push"` slips through - measured), the worker's environment also rewrites every git push URL to nowhere and points docker at a dead socket. `oc selftest` proves both in a throw-away repo, judged by what reached the remote. This stops accidents, it is not a sandbox. |
+| **Nothing gets lost** | The worker's result lies in the worktree uncommitted. Before `report`, `send`, `review` and `done`, oc-connect snapshots it into `refs/oc/<slug>`. A correction that makes things worse, a wrong `git checkout`, even `done --force` - `restore` puts the state back, and the state before the restore is snapshotted too. |
+| **Review is enforced** | Claude records its review (checks run, defeat test, known gaps) with `review`. A hook blocks `git commit` in a job's worktree until that review matches exactly the current files. |
+| **Own worker profile** | Workers run with an OpenCode config of their own: none of your OpenCode plugins (oh-my-opencode, superpowers, …), but your logins, MCP servers and session-tracker plugins. Three agents - `oc-fast`, `oc-strong`, `oc-ui` - take their models from your oh-my-opencode roles if you have it, and share a worker prompt written for this workflow. Your interactive OpenCode stays untouched. |
+
+## The lifecycle of a job
+
+1. Claude researches and writes the task (files with lines, required behaviour, tests, what must not change, check commands).
+2. `delegate`: worktree from `origin/HEAD` on branch `oc/<slug>`, git-ignored `.env` files copied, and back to you right away. In the background: session created, a new tab opens **directly in that session**, installs dependencies from lockfiles (`npm ci`, `pnpm`/`yarn`/`bun` frozen), starts the worker, task sent.
+3. The monitor reports: running (with a browser link), questions, finished, failed, stalled, over budget, stopped. Claude answers what code and task settle and asks you the rest.
+4. Finished: Claude reads the report and the full diff, runs all checks, does a defeat test, hunts for untested cases, sends corrections into the same session. Every one of these steps snapshots the worktree first; `oc snapshots <job>` lists them, `oc restore <job> [commit]` puts one back.
+5. Claude records the review, commits, opens the PR, records it (`set_pr`) and closes the worker. After merge, `done` removes the worktree - it refuses while unpushed work exists.
+
+## Good to know
+
+- **How the worker profile works.** OpenCode merges `OPENCODE_CONFIG` into your global config, so plugins cannot be removed that way; `--pure` would also drop session-tracker plugins. oc-connect points the worker's `XDG_CONFIG_HOME` to its own directory (`~/.local/state/oc-connect/worker-home`) with a generated `opencode.json`, your plugin *files* and a symlink for every other entry of `~/.config` (so `gh`, `git` and friends keep their config). Logins live in OpenCode's data dir and are unaffected.
+- **Cost on flat-rate providers.** OpenCode Go reports a per-message cost (measured: $0.01 for a small job on deepseek-v4.1-flash), so `OC_BUDGET` fires there as well - but that number is not what a subscription actually charges you. The limit that matters then is the provider's usage quota, which oc-connect cannot read.
+- **Typing in a worker tab** goes to the agent shown at the bottom of that tab. With the worker profile that is the job's agent; with `OC_PROFILE=inherit` it is your default agent (e.g. oh-my-opencode's orchestrator), not the job's subagent.
+- **Subagents as job agents (inherit mode).** oh-my-opencode's `fixer` and `designer` are OpenCode *subagents*. `opencode --agent fixer` fails for them, but the HTTP API accepts them, so the job's agent goes with every prompt.
+- **Why a tab per job.** Trackers like Vibe Island find a session's terminal by walking up from the OpenCode process to the first TTY. A shared background server made all jobs look like one session with no tab to jump to.
+- **Tabs close themselves.** A reaper beside each worker stops it once the job has been idle for `OC_IDLE_CLOSE_MIN` minutes, or two minutes after its Claude session ended without another session taking the job over (a restart of Claude Code is fast enough). A busy or asking worker is never stopped. Worktree and session stay; `send` or `open` bring the worker back in the same session. Reading a finished job in its tab for longer than the limit closes it - raise the limit if you like to linger.
+- **Terminal.app keeps dead tabs** with their device name, and the next tab can reuse it; trackers then jumped into the dead tab. oc-connect records the window id of every tab it opens and closes those tabs once nothing runs in them. (Matching by title does not work: OpenCode sets its own title and resets it to "Terminal" on exit.)
+- **Terminal.app lists every tab as its own window** in AppleScript. oc-connect therefore opens a tab via the Shell menu and writes the worker command only into a window id that did not exist before. An earlier version wrote into "the selected tab of the front window" - when opening the tab failed, that was the tab running Claude Code.
+- **The tab opens straight into the job's session.** The session is created first by a short-lived server; switching a running TUI to a session afterwards was unreliable and left the tab on the start screen.
+- **No agent-panel row.** Only subagents get a custom row in Claude Code's agent panel, and subagents are model calls. A Haiku watcher was tried for it and misreported the job state (it summarised although told to pass the output through), and the panel setting from the plugin did not run. Status rows and the monitor need no model.
+- **Monitors are experimental** in Claude Code and run only in interactive sessions. Without them Claude uses `oc wait` in the background.
+- **Review stays Claude's job.** In real use the workers were fast and formally clean, but checked "nothing else broke" only with existing tests. The gaps were found in Claude's review.

@@ -56,7 +56,7 @@ Rules for changes:
 - The plugin `settings.json` key `subagentStatusLine` never ran (logged: zero calls while an agent ran). Reason not found.
 - A Haiku watcher agent told to return tool output unchanged summarised it anyway and reported a stale git state. Do not put a model between a job and the lead.
 - Plugin `bin/` is on the Bash PATH; `${CLAUDE_PLUGIN_ROOT}` changes with every version, so settings that must survive updates point to the shim `~/.local/state/oc-connect/bin/oc`, rewritten at every SessionStart.
-- A PreToolUse hook returning `permissionDecision: "ask"` brings up the confirmation dialog even in a session started with `--dangerously-skip-permissions` (measured 2.1.280 with a hook on an MCP tool; the user saw and confirmed the dialog). Hooks in `.claude/settings.local.json` took effect without a restart. This is what makes the delegation gate hard.
+- A PreToolUse hook returning `permissionDecision: "ask"` brings up the confirmation dialog even in a session started with `--dangerously-skip-permissions` (measured 2.1.280 with a hook on an MCP tool; the dialog appeared and was confirmed). Hooks in `.claude/settings.local.json` took effect without a restart. This is what makes the delegation gate hard.
 - Plugin `userConfig` reaches hooks as `CLAUDE_PLUGIN_OPTION_<KEY>` and the MCP server via `${user_config.KEY}` in `plugin.json` env (the latter measured; the hook variable is from the docs and not yet seen live). Shell-form hook commands reject `${user_config.*}`.
 - A plugin's `.mcp.json` is ALSO read as project config when you work in the plugin's own checkout, and `${CLAUDE_PLUGIN_ROOT}` is empty there: `ENOENT ... /bin/oc`, a second server named `opencode` stuck on "Pending approval". Since 0.6.0 the config lives in `plugin.json` (`mcpServers`, inline object - a path or `.mcp.json` also work).
 
@@ -78,7 +78,7 @@ Three real jobs in a scratch repo (2026-09-20, `oc-fast` on `opencode-go/deepsee
 Timings: `delegate` to task sent 17 s (about 1.5 s of it the short-lived server for the session), small job finished after 65 s, job with a question about 100 s. `oc status` 6-26 ms, status line 50-90 ms per redraw - the poll loop is not a cost factor.
 
 Reaper (2026-09-22, scratch repo, `oc-fast` on `opencode-go/deepseek-v4.1-flash`): with `OC_IDLE_CLOSE_MIN=1` an idle worker was stopped after ~75 s and its tab closed; the reason showed in `status`. `send` to the stopped worker reopened the tab in the same session and the worker answered. The owner-ended path is covered by unit tests only - while a session runs, its monitor adopts orphaned jobs, so it cannot be provoked live from inside one.
-Vibe Island: clicking the job's session brought its OpenCode terminal to the front (confirmed by the user, 2026-09-22). In that run the worker opened as its own window, not as a tab of Claude's window.
+Vibe Island: clicking the job's session brought its OpenCode terminal to the front (confirmed by hand, 2026-09-22). In that run the worker opened as its own window, not as a tab of Claude's window.
 
 Not yet seen live with the installed plugin (needs a restart): the delegate gate from the plugin's own `hooks.json`, `CLAUDE_PLUGIN_OPTION_AUTONOMY` in the hook, `/oc:mode`.
 
@@ -90,8 +90,8 @@ Unit tests: 81, green on Python 3.14 and 3.9.
 
 ## Open
 
-1. **Tab or window.** Default is now `window` (option `worker_terminal`). In full screen macOS still makes it a tab (see Terminal.app facts); whether the Shell-menu click of `tab` mode works on this machine is not re-checked.
-2. **Status line rows** confirmed on screen in the README demo (tmux, `oc statusline` as the only status line). Under another status line (Open Island, claude-hud) not yet seen.
+1. **Tab or window.** Default is now `window` (option `worker_terminal`). In full screen macOS still makes it a tab (see Terminal.app facts); whether the Shell-menu click of `tab` mode still works is not re-checked.
+2. **Status line rows** confirmed on screen in the README demo (tmux, `oc statusline` as the only status line). Under another plugin's status line not yet seen.
 3. **Quality of the worker profile.** Three real tasks were clean (see above): test-first, honest defeat test, no scope creep, an open decision asked instead of guessed. Still open: a task in a real project with real history, and a comparison with oh-my-opencode's orchestrator.
 4. **Terminals other than Terminal.app**: tmux verified (README demo, 2026-10-24: the worker opened as a tmux window, the job row showed under Claude's prompt). iTerm2, WezTerm and kitty are implemented but untested.
 5. **Agent panel row.** Would need a subagent (a model call) and the plugin's `subagentStatusLine` did not run. Parked unless Claude Code offers rows for non-model tasks.

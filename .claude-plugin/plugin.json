@@ -2,9 +2,10 @@
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "oc",
   "version": "1.0.0",
-  "description": "Claude Code as the lead, OpenCode as the workers: delegate bounded coding tasks to OpenCode, one git worktree and one terminal tab per job (visible in Vibe Island and similar trackers), live status in Claude Code, and Claude reviews every diff before anything is committed.",
+  "description": "Let Claude Code hand coding tasks to OpenCode 1 and review every line before it is committed: one git worktree and terminal window per job, live status in Claude Code, workers cannot push.",
   "author": {
-    "name": "Jona Andresen"
+    "name": "Jona Andresen",
+    "url": "https://github.com/jonaandresen"
   },
   "homepage": "https://github.com/jonaandresen/oc-connect",
   "repository": "https://github.com/jonaandresen/oc-connect",

@@ -2,7 +2,10 @@
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
   "name": "oc-connect",
   "description": "Claude Code as the lead, OpenCode as the workers.",
-  "owner": { "name": "Jona Andresen" },
+  "owner": {
+    "name": "Jona Andresen",
+    "url": "https://github.com/jonaandresen"
+  },
   "plugins": [
     {
       "name": "oc",
