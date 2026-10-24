@@ -815,6 +815,19 @@ class Release(unittest.TestCase):
             with mock.patch.object(core, "_opencode_version", return_value=v):
                 core.require_opencode_1()
 
+    def test_oc_opencode_points_to_a_second_install(self):
+        with tempfile.TemporaryDirectory() as d:
+            fake = os.path.join(d, "opencode 1")
+            with open(fake, "w") as fh:
+                fh.write("#!/bin/sh\necho 1.19.4\n")
+            os.chmod(fake, 0o755)
+            with mock.patch.dict(os.environ, {"OC_OPENCODE": fake}):
+                self.assertEqual(core._opencode_version(), "1.19.4")
+                core.require_opencode_1()
+                self.assertEqual(core.opencode_setup()["opencode"], fake)
+                cmd = ops._worker_command({"slug": "s1", "dir": "/w", "port": 4101, "agent": "oc-fast"}, "ses_1", False)
+                self.assertIn(f"'{fake}' --port 4101", cmd)
+
     def test_selftest_names_the_provider_error(self):
         res = {"info": {"error": {"name": "APIError", "data": {"message": "This API key has expired.",
                                                                 "statusCode": 401}}}, "parts": []}

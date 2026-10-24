@@ -1,8 +1,11 @@
 # Changelog
 
-## 0.8.1
+## 1.0.0
 
-- OpenCode 2 is detected and refused with a clear message (`setup` warns, `delegate`, `oc start` and `selftest` stop) instead of failing with `HTTP Error 405`. OpenCode 2 moved its server API to `/api/...` behind a password (measured on 2.0.29). Support for it is planned for the next release.
+First public release, for OpenCode 1.x. From here on the major version follows OpenCode's: oc-connect 1.x for OpenCode 1 (branch `v1`), 2.x for OpenCode 2 (`main`).
+
+- `OC_OPENCODE` points to the OpenCode binary, for a 1.x install next to OpenCode 2. Found while recording the README demo: the MCP server took OpenCode 2 from the login shell's PATH.
+- OpenCode 2 is detected and refused with a clear message (`setup` warns, `delegate`, `oc start` and `selftest` stop) instead of failing with `HTTP Error 405`. OpenCode 2 moved its server API to `/api/...` behind a password (measured on 2.0.29). oc-connect 2.x supports it.
 - `selftest` names the provider error (for example an expired API key) instead of reporting that the model skipped the command.
 - `selftest` checks which command the model really ran. A model asked for `bash -c "git push ..."` ran `git remote -v` instead; its output showed the disabled push URL and the selftest counted a push that never happened as blocked. Such a run now counts as NOT RUN, and a wrapped command is shown as `(ran as: ...)`.
 - `oc --version` and the MCP server reported 0.6.0; they now report the plugin version, and a test keeps both in sync.

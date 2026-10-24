@@ -2,7 +2,14 @@
 
 **Claude Code as the lead, OpenCode as the workers.**
 
+[![Release](https://img.shields.io/github/v/release/jonaandresen/oc-connect?sort=semver)](https://github.com/jonaandresen/oc-connect/releases)
+[![OpenCode](https://img.shields.io/badge/OpenCode-1.x-orange)](https://opencode.ai)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+
 Claude Code plans, writes a precise task and reviews. [OpenCode](https://opencode.ai) implements it on a cheaper model, in its own git worktree and its own terminal tab you can watch live. Claude answers the worker's questions (and passes on only the ones that are really yours), then reads the full diff, runs the checks and does a defeat test before anything is committed.
+
+<p align="center"><img src="docs/demo.gif" alt="Claude Code delegates a task to an OpenCode worker, the worker implements it in its own window, Claude reviews the diff, breaks the code on purpose to see the tests fail, and lists the gaps it found" width="900"></p>
+<p align="center"><sub>A real run, unedited apart from 2× speed: Claude Code (Sonnet) delegates, you confirm, an OpenCode 1.19.4 worker on a free model implements it in its own window, Claude reviews - including its own defeat test - and names the gaps.</sub></p>
 
 ```
 you ──► Claude Code (lead) ──task──► OpenCode worker (tab "OC 276", port 4101, worktree ../repo-worktrees/276)
@@ -28,15 +35,24 @@ you ──► Claude Code (lead) ──task──► OpenCode worker (tab "OC 27
 ## Requirements
 
 - Claude Code ≥ 2.1.271
-- [OpenCode](https://opencode.ai) 1.x (≥ 1.18, tested up to 1.19.4) with a configured provider. **OpenCode 2 is not supported yet** - it has a new server API; `oc setup` warns and `delegate` refuses with a clear message. `curl -fsSL https://opencode.ai/install | bash` installs 1.x.
+- [OpenCode](https://opencode.ai) 1.x (≥ 1.18, tested up to 1.19.4) with a configured provider; `curl -fsSL https://opencode.ai/install | bash` installs it. For **OpenCode 2** use oc-connect 2.x (`main`): OpenCode 2 has a new server API, and this version refuses it with a clear message. With both installed, point `OC_OPENCODE` to the 1.x binary.
 - `python3` ≥ 3.9 (ships with macOS), `git`
 - A terminal that can open tabs: tmux (anywhere), WezTerm, kitty, iTerm2 or Terminal.app. **Terminal.app** needs *System Settings → Privacy & Security → Accessibility → Terminal*; without it workers open in windows.
 - Optional: [oh-my-opencode-slim](https://github.com/alvinunreal/oh-my-opencode-slim), [superpowers](https://github.com/obra/superpowers)
 
+## Versions
+
+The major version follows OpenCode's:
+
+| oc-connect | OpenCode | Branch |
+|---|---|---|
+| **1.x** (this branch) | 1.x | `v1` |
+| 2.x | 2.x | `main`, `v2` |
+
 ## Install
 
 ```bash
-claude plugin marketplace add jonaandresen/oc-connect
+claude plugin marketplace add jonaandresen/oc-connect#v1
 claude plugin install oc@oc-connect
 ```
 
@@ -92,6 +108,7 @@ The gate covers the `delegate` tool and `oc start` run through Bash.
 |---|---|---|
 | `OC_AGENT` | `oc-fast` | Default agent |
 | `OC_PROFILE` | `isolated` | `inherit` runs workers with your own OpenCode setup instead of the worker profile |
+| `OC_OPENCODE` | `opencode` on PATH | Path of the OpenCode binary, e.g. a 1.x install next to OpenCode 2 |
 | `OC_MODEL` | agent's own model | `provider/model` override |
 | `OC_WT_ROOT` | `<repo>-worktrees` | Where worktrees go |
 | `OC_BASE_REF` | `origin/HEAD` | Where jobs branch from |

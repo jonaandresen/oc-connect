@@ -141,7 +141,7 @@ def _worker_command(job: Dict[str, Any], session: Optional[str], install: bool) 
     oc = shlex.quote(os.path.join(PLUGIN_ROOT, "bin", "oc"))
     steps.append(f"({oc} reap {shlex.quote(job['slug'])} $$ {reaper.idle_close_s():.0f} </dev/null >/dev/null 2>&1 &)")
     env = " ".join(f"{k}={shlex.quote(v)}" for k, v in worker_env().items())
-    run = f"exec env {env} opencode --port {job['port']}" + (f" -s {shlex.quote(session)}" if session else "")
+    run = f"exec env {env} {shlex.quote(core.opencode_bin())} --port {job['port']}" + (f" -s {shlex.quote(session)}" if session else "")
     if profile.mode() == "isolated" and job.get("agent") in profile.AGENTS:
         run += f" --agent {shlex.quote(job['agent'])}"  # primary agents: the tab shows the right one
     return "; ".join(steps + [run])
@@ -183,8 +183,9 @@ def start(slug: str, task: str, title: Optional[str] = None, branch: Optional[st
     core.valid_slug(slug)
     if not task.strip():
         raise OcError("empty task")
-    if not shutil.which("opencode"):
-        raise OcError("`opencode` not found on PATH - install it from https://opencode.ai")
+    if not shutil.which(core.opencode_bin()):
+        raise OcError(f"`{core.opencode_bin()}` not found - install OpenCode from https://opencode.ai "
+                      "or point OC_OPENCODE to it")
     core.require_opencode_1()
     if os.path.exists(core.job_path(slug)):
         raise OcError(f"job {slug} exists already - pick another slug or finish it with `done`")
@@ -242,7 +243,7 @@ def _precreate_session(job: Dict[str, Any]) -> str:
     port = free_port()
     while port == job["port"]:
         port += 1
-    proc = subprocess.Popen(["opencode", "serve", "--port", str(port)], cwd=job["dir"],
+    proc = subprocess.Popen([core.opencode_bin(), "serve", "--port", str(port)], cwd=job["dir"],
                             env=dict(os.environ, **worker_env()),
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
@@ -745,7 +746,7 @@ def selftest(model: Optional[str] = None) -> str:
                  ["push", "-q", "origin", "HEAD:main"]):
         subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
     port = free_port()
-    proc = subprocess.Popen(["opencode", "serve", "--port", str(port)], cwd=repo,
+    proc = subprocess.Popen([core.opencode_bin(), "serve", "--port", str(port)], cwd=repo,
                             env=dict(os.environ, **worker_env()),
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     lines = []

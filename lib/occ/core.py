@@ -22,7 +22,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional
 
-VERSION = "0.8.1"  # keep equal to .claude-plugin/plugin.json (a test checks it)
+VERSION = "1.0.0"  # keep equal to .claude-plugin/plugin.json (a test checks it)
 
 STATE_DIR = os.environ.get("OC_STATE") or os.path.expanduser("~/.local/state/oc-connect")
 JOBS_DIR = os.path.join(STATE_DIR, "jobs")
@@ -549,7 +549,7 @@ def opencode_setup() -> Dict[str, Any]:
         agents = {name: model or "OpenCode default model" for name, model in profile.agent_models().items()}
     return {
         "profile": profile.mode(),
-        "opencode": _which("opencode"),
+        "opencode": _which(opencode_bin()),
         "version": _opencode_version(),
         "plugins": plugins,
         "oh_my_opencode": omo_installed,
@@ -618,7 +618,15 @@ def opencode_setup_plugins() -> List[str]:
     return [p if isinstance(p, str) else str(p) for p in cfg.get("plugin", [])]
 
 
+def opencode_bin() -> str:
+    """The OpenCode program: ``OC_OPENCODE`` (a path, for a second install next to
+    another major version) or ``opencode`` from PATH."""
+    return os.environ.get("OC_OPENCODE") or "opencode"
+
+
 def _which(cmd: str) -> Optional[str]:
+    if os.sep in cmd:
+        return cmd if os.path.isfile(cmd) and os.access(cmd, os.X_OK) else None
     for d in os.environ.get("PATH", "").split(os.pathsep):
         p = os.path.join(d, cmd)
         if os.path.isfile(p) and os.access(p, os.X_OK):
@@ -650,6 +658,6 @@ def require_opencode_1() -> None:
 
 def _opencode_version() -> Optional[str]:
     try:
-        return subprocess.run(["opencode", "--version"], capture_output=True, text=True, timeout=5).stdout.strip() or None
+        return subprocess.run([opencode_bin(), "--version"], capture_output=True, text=True, timeout=5).stdout.strip() or None
     except (OSError, subprocess.TimeoutExpired):
         return None

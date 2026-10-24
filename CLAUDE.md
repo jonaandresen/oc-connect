@@ -84,14 +84,16 @@ Not yet seen live with the installed plugin (needs a restart): the delegate gate
 
 0.8.1 (2026-10-24): install from the marketplace into an empty Claude Code config (2.1.307) loaded 7 skills, 3 hooks and the MCP server; MCP `initialize`/`tools/list` answered; `oc setup` on 2.0.29 warns; `selftest` on 1.19.4 showed the provider error (expired key); with `opencode/deepseek-v4.1-flash-free` (no account) all six commands ran exactly as given and were blocked - direct push and `docker ps` by the guard, the indirect forms by the environment - and nothing reached the remote.
 
-Unit tests: 80, green on Python 3.14 and 3.9.
+README demo (docs/demo.gif, 2026-10-24): recorded with asciinema in a tmux session (`claude --plugin-dir . --setting-sources project,local`, `OC_OPENCODE` = OpenCode 1.19.4, `OC_MODEL=opencode/deepseek-v4.1-flash-free`), rendered with `agg --speed 2`. Full cycle in one take: confirmation dialog, worker window, a permission request answered by Claude, monitor events, review with Claude's own defeat test.
+
+Unit tests: 81, green on Python 3.14 and 3.9.
 
 ## Open
 
 1. **Tab or window.** Default is now `window` (option `worker_terminal`). In full screen macOS still makes it a tab (see Terminal.app facts); whether the Shell-menu click of `tab` mode works on this machine is not re-checked.
-2. **Status line rows** (`▶ slug …` under the Open Island line) have not been confirmed on screen in a live session.
+2. **Status line rows** confirmed on screen in the README demo (tmux, `oc statusline` as the only status line). Under another status line (Open Island, claude-hud) not yet seen.
 3. **Quality of the worker profile.** Three real tasks were clean (see above): test-first, honest defeat test, no scope creep, an open decision asked instead of guessed. Still open: a task in a real project with real history, and a comparison with oh-my-opencode's orchestrator.
-4. **Terminals other than Terminal.app** (iTerm2, WezTerm, kitty, tmux) are implemented but untested.
+4. **Terminals other than Terminal.app**: tmux verified (README demo, 2026-10-24: the worker opened as a tmux window, the job row showed under Claude's prompt). iTerm2, WezTerm and kitty are implemented but untested.
 5. **Agent panel row.** Would need a subagent (a model call) and the plugin's `subagentStatusLine` did not run. Parked unless Claude Code offers rows for non-model tasks.
-6. **OpenCode 2 support** (next release, on `main`; 0.8.x for OpenCode 1 stays on the `opencode-1` branch). Port `core.Worker`, profile, guard, terminal launch and selftest to the 2.x API, then re-measure every OpenCode fact above. Decide then whether to use the official SDKs (TypeScript) instead of the hand-rolled API client.
+6. **OpenCode 2 support** is oc-connect 2.x on `main`/`v2`; this branch (`v1`) is 1.x for OpenCode 1 and gets fixes only. Port `core.Worker`, profile, guard, terminal launch and selftest to the 2.x API, then re-measure every OpenCode fact above. Decide then whether to use the official SDKs (TypeScript) instead of the hand-rolled API client.
 7. **Budget on flat-rate providers:** the cost per message is reported (see above), but it does not describe a subscription's real limit, and the provider quota is not readable.
