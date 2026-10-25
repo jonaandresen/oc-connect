@@ -7,6 +7,7 @@ Claude does the thinking: it plans, writes a precise task and reviews the result
 [![Release](https://img.shields.io/github/v/release/jonaandresen/oc-connect?sort=semver)](https://github.com/jonaandresen/oc-connect/releases)
 [![OpenCode](https://img.shields.io/badge/OpenCode-1.x-orange)](https://opencode.ai)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
+[![Built with AI assistance](https://img.shields.io/badge/built%20with-AI%20assistance-8A2BE2)](#ai-assisted-development)
 
 <p align="center"><img src="docs/demo.gif" alt="Claude Code delegates a task to an OpenCode worker, the worker implements it in its own window, Claude reviews the diff, breaks the code on purpose to see the tests fail, and lists the gaps it found" width="900"></p>
 <p align="center"><sub>A real run at 2× speed: Claude delegates, you confirm, an OpenCode worker on a free model implements it, Claude reviews - including its own defeat test - and names the gaps.</sub></p>
@@ -101,6 +102,10 @@ claude --plugin-dir .       # try the working copy
 ```
 
 Project layout, the live selftest, rules for changes and releasing: [docs/development.md](docs/development.md). What was measured about OpenCode and Claude Code, and what is still open: [docs/measured.md](docs/measured.md).
+
+## AI-assisted development
+
+oc-connect is built with Claude Code: code, tests and docs are written in collaboration with AI. Every change passes `scripts/check.sh`, every claim about OpenCode or Claude Code was measured before it went in ([docs/measured.md](docs/measured.md)), and releases are checked end to end with real OpenCode workers. Issues and pull requests are welcome.
 
 ## License
 
