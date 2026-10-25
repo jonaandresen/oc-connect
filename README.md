@@ -45,6 +45,8 @@ Point `OC_OPENCODE` to the OpenCode 1 binary - see [configuration](docs/configur
 
 **Update:** `claude plugin marketplace update oc-connect && claude plugin update oc@oc-connect`, then restart Claude Code.
 
+**Uninstall:** `claude plugin uninstall oc@oc-connect` - finish open jobs first; removing the state and the status line entry is described in [configuration](docs/configuration.md#uninstall).
+
 ## Use
 
 Just ask:
@@ -83,6 +85,12 @@ you ──► Claude Code (lead) ──task──► OpenCode worker  (own windo
 ```
 
 More: [how it works in detail](docs/how-it-works.md) · [configuration](docs/configuration.md) · [changelog](CHANGELOG.md)
+
+## Privacy
+
+oc-connect sends nothing anywhere itself and has no telemetry. It talks only to the OpenCode server it starts on your machine. The worker sends the task and the code it reads to the model provider you set up in OpenCode - the same as using OpenCode yourself. Git-ignored `.env` files are copied into the job's worktree so the code can run, which means the worker can read them.
+
+It writes job state to `~/.local/state/oc-connect`, a worktree, branch and snapshot ref per job to your repository, and `~/.claude/settings.json` only if you accept the status line in `/oc:setup`. Your OpenCode and git config stay untouched. The full list: [what oc-connect writes](docs/configuration.md#what-oc-connect-writes).
 
 ## Development
 
