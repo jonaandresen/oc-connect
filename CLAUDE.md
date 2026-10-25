@@ -121,3 +121,17 @@ Unit tests (2.0.0): 86, green on Python 3.14 and 3.9.
 8. **OpenCode 2's API is "experimental"** (its own words, version 0.0.1). Re-run the selftest and a CLI cycle after every OpenCode 2 update; the facts above say which shapes oc-connect relies on.
 9. **Code mode:** whether permission rules apply to tools called inside `execute` is open (see the OpenCode 2 facts).
 10. **Official SDKs.** The MCP protocol and the OpenCode API are hand-rolled (standard library only). Worth revisiting if OpenCode 2's API keeps moving.
+
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues in jonaandresen/oc-connect (public), via `gh`. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default vocabulary: needs-triage, needs-info, ready-for-agent, ready-for-human, wontfix. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: `GLOSSARY.md` and `docs/adr/` at the repo root (created lazily). See `docs/agents/domain.md`.
