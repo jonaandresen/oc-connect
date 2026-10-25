@@ -91,11 +91,11 @@ More: [how it works in detail](docs/how-it-works.md) · [configuration](docs/con
 
 ```bash
 git clone https://github.com/jonaandresen/oc-connect && cd oc-connect
-python3 -m unittest discover tests      # fake OpenCode server, no model needed
-claude --plugin-dir .                   # try the working copy
+scripts/check.sh            # unit tests (fake OpenCode server, no model) + plugin validation -> RESULT: GREEN
+claude --plugin-dir .       # try the working copy
 ```
 
-Notes for contributors - what was measured and what is still open - are in [CLAUDE.md](CLAUDE.md).
+Project layout, the live selftest, rules for changes and releasing: [docs/development.md](docs/development.md). What was measured about OpenCode and Claude Code, and what is still open: [docs/measured.md](docs/measured.md).
 
 ## License
 
