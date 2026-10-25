@@ -1,24 +1,6 @@
-# oc-connect - working on the plugin
+# What was measured
 
-Claude Code plugin: Claude is the lead, OpenCode workers implement. What it does for users is in `README.md`, the version history in `CHANGELOG.md`. This file is for whoever changes the plugin: how to work on it, what was measured, what is verified and what is still open.
-
-## Develop, test, ship
-
-```bash
-python3 -m unittest discover tests          # fake OpenCode server, no model; must pass on /usr/bin/python3 (3.9) too
-/usr/bin/python3 -m unittest discover tests
-claude plugin validate --strict .
-bin/oc selftest --model opencode-go/deepseek-v4.1-flash   # real OpenCode: both guard layers, throw-away repo
-```
-
-Ship: commit (no Claude/AI signature lines), `git push`, then
-`claude plugin marketplace update oc-connect && claude plugin update oc@oc-connect` and restart Claude Code. The installed copy lives in `~/.claude/plugins/cache/oc-connect/oc/<version>/`; never edit it except for a throw-away experiment, and restore it afterwards.
-
-Rules for changes:
-- Standard library only, Python 3.9 compatible (`from __future__ import annotations`, no `match`, no `X | Y` at runtime).
-- Every fix gets a test, and every test gets a defeat test: break the fix, see the test turn red.
-- A claim about OpenCode or Claude Code behaviour goes into code or docs only after it was measured. Several "obvious" assumptions below turned out wrong.
-- End-to-end probes run in a scratch repo with a local bare `origin`, never in a real project. Clean up with `oc done <slug> --force`, and close only the terminal tabs you opened yourself.
+Facts about OpenCode, Claude Code and the terminals that oc-connect relies on, what was verified end to end, and what is still open. Each fact was measured, not assumed - several "obvious" assumptions turned out wrong. Add new measurements here, with version and date.
 
 ## Measured facts (OpenCode 1.18.31, Claude Code 2.1.277, macOS Terminal.app)
 

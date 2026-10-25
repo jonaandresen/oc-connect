@@ -3,7 +3,7 @@
 A fake OpenCode server stands in for the real one, so the state machine
 (running / waiting / done / stopped) is tested without a model or a terminal.
 The end-to-end path against real OpenCode is covered by ``oc selftest`` and the
-manual checks in CLAUDE.md.
+manual checks in docs/measured.md.
 """
 import io
 import json
