@@ -1,6 +1,6 @@
 # Configuring oc-connect
 
-Everything here is optional - the defaults work. Background: [how-it-works.md](how-it-works.md).
+Everything here is optional - the defaults work. Background: [how-it-works.md](how-it-works.md). At the end: [what oc-connect writes](#what-oc-connect-writes) and how to [uninstall](#uninstall) it.
 
 **Delegation mode** (asked when the plugin is enabled, change via `/plugin` → oc → configure, or at any time with `/oc:mode`, which wins over the option until `/oc:mode default`):
 
@@ -40,3 +40,32 @@ The gate covers the `delegate` tool and `oc start` run through Bash.
 **Terminals.** Workers open in tmux (anywhere), WezTerm, kitty, iTerm2 or Terminal.app. Terminal.app needs *System Settings → Privacy & Security → Accessibility → Terminal* for tabs; without it workers open in windows. Tested: Terminal.app and tmux.
 
 **Optional companions.** [oh-my-opencode-slim](https://github.com/alvinunreal/oh-my-opencode-slim): its roles give the worker agents their models. [superpowers](https://github.com/obra/superpowers): stays in your interactive OpenCode; workers run without it.
+
+## What oc-connect writes
+
+On your machine, nowhere else:
+
+| Where | What |
+|---|---|
+| `~/.local/state/oc-connect/` (`OC_STATE`) | Job state (`jobs/`), the guard (`guard.json`), the worker profile (`worker-home/`), worker logs (`logs/`), a status cache (`cache/`), the delegation mode (`autonomy`), whether your latest prompt asked for OpenCode (`prompts/`, a `0` or `1` per Claude session - not the prompt), the window ids of worker tabs (`terminal-windows`) and the `oc` shim the status line calls (`bin/`) |
+| `<repo>-worktrees/` (`OC_WT_ROOT`) | One git worktree per job; `done` removes it |
+| Your repository | A branch `oc/<job>` per job (kept after `done`) and snapshots under `refs/oc/<job>` |
+| `~/.claude/settings.json` | Only if you accept the status line in `/oc:setup`: `statusLine.command` runs oc-connect, your previous command is kept after `--base`, a backup is saved as `settings.json.before-oc-connect` |
+
+Not changed: your OpenCode config (`~/.config/opencode` is read, and linked into the worker profile), your git config (the push block lives only in the worker's environment), your prompts (not stored).
+
+Network: oc-connect itself talks only to the OpenCode server it starts on `127.0.0.1`. Starting a job runs `git fetch origin` and, if the worktree has a lockfile, a frozen dependency install (`npm ci`, `pnpm`/`yarn`/`bun install`). The worker sends the task and the code it reads to the model provider you set up in OpenCode, as OpenCode does when you use it yourself. Git-ignored `.env` files are copied into the worktree (`OC_COPY`), so the worker can read them - set `OC_COPY` to an empty value if it should not.
+
+## Uninstall
+
+1. Finish or remove open jobs, in Claude Code while the plugin is still installed: `/oc:status`, then `!oc done <job>` (`--force` discards unpushed work). A job left open keeps its worker running.
+2. Remove the plugin:
+   ```bash
+   claude plugin uninstall oc@oc-connect
+   claude plugin marketplace remove oc-connect
+   ```
+3. If you added the status line: in `~/.claude/settings.json`, set `statusLine.command` back to the command after `--base`, or remove `statusLine` if there was none.
+4. Remove the state: `rm -rf ~/.local/state/oc-connect` (this deletes your edits to `guard.json` too).
+5. Per repository, if you like: delete the snapshots with `git for-each-ref --format='delete %(refname)' refs/oc | git update-ref --stdin`, the branches `oc/*` you no longer need with `git branch -D`, and the empty `<repo>-worktrees/` folder.
+
+OpenCode keeps the workers' sessions in its own data, like any other session.
