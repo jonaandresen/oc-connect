@@ -4,6 +4,7 @@
 
 - **Workers run in the background by default.** No terminal opens at `delegate`; `/oc:show <job>` (the `open` tool) opens a window with OpenCode's TUI attached to the running worker (`oc attach`), and typing there goes into the job's session. `close`, the reaper and `done` end those windows with the worker. The option `worker_terminal` (`OC_OPEN`) keeps `window` and `tab` for one terminal per job from the start. Session trackers such as Vibe Island see a background worker only while its window is open.
 - A worker started from a login shell found another OpenCode than Claude's (measured: `bash -l` found 1.18 in `/opt/homebrew/bin`, Claude's PATH 2.1.4 in `~/.opencode/bin`). The resolved path now travels with the command, in tabs too.
+- `docs/measured.md`: plugin vs. plain `opencode run` vs. Claude alone on three real tasks - at that task size delegating cost more Claude usage than doing it, and the plugin cost more than the plain CLI. `extras/opencode-skill/` is the lightweight alternative that came out of it: one skill plus a wrapper that runs `opencode run` in Anthropic's sandbox runtime.
 
 ## 2.0.0
 

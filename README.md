@@ -88,6 +88,16 @@ you ──► Claude Code (lead) ──task──► OpenCode worker  (own workt
             └──────── notification ◄───────────────┘
 ```
 
+## Without the plugin
+
+A measurement on three real tasks ([measured.md](docs/measured.md#plugin-vs-plain-cli-vs-claude-alone-2026-10-26-opencode-214-claude-code-21310)) found the plugin's machinery costs Claude more than calling `opencode run` directly, and that small tasks are cheaper for Claude to do itself. [`extras/opencode-skill`](extras/opencode-skill) is the lightweight alternative: one Claude Code skill plus a wrapper that runs `opencode run` inside Anthropic's [sandbox runtime](https://github.com/anthropics/sandbox-runtime) (writes only in the repository, network only to the model provider), retries on timeouts and connection errors, and lets you watch the worker live. No questions or permission requests reach Claude - the worker decides within the sandbox - and there is no worktree per job unless Claude creates one.
+
+```bash
+ln -s "$PWD/extras/opencode-skill" ~/.claude/skills/opencode   # or copy the folder there
+```
+
+Needs OpenCode 2, `jq` and `npx`. Use either the plugin or the skill, not both.
+
 More: [how it works in detail](docs/how-it-works.md) · [configuration](docs/configuration.md) · [changelog](CHANGELOG.md)
 
 ## Privacy

@@ -31,6 +31,7 @@ templates/            guard.json (worker permissions), worker-prompt.md
 tests/test_occ.py     unit tests against a fake OpenCode server
 scripts/check.sh      the gate
 docs/                 user docs, this file, measured.md, demo.gif
+extras/opencode-skill the plugin-free alternative: a skill and `oc-run` (opencode run in a sandbox)
 ```
 
 ## Check

@@ -1,0 +1,102 @@
+#!/usr/bin/env bash
+# Run an OpenCode worker inside Anthropic's sandbox runtime (srt).
+#
+#   oc-run [-s SESSION] [-t TITLE] [-m MODEL] TASK_FILE   start or continue a worker
+#   oc-run watch TITLE                                      follow a running worker live in a terminal window
+#   oc-run view SESSION                                     open a finished session in the OpenCode TUI
+#
+# The worker may write only in this repository (plus temp and OpenCode's own dirs),
+# not git hooks/config or Claude config, and reach only the model provider.
+# Prints a summary: outcome, session id, the worker's final message, changed files.
+# Retries on timeouts and connection errors, continuing the same session.
+set -uo pipefail
+
+SRT_PKG="@anthropic-ai/sandbox-runtime@0.0.79"
+MODEL="${OC_MODEL:-opencode/deepseek-v4.1-flash-free}"
+TIMEOUT="${OC_TIMEOUT:-900}"
+RETRIES=2
+DOMAINS='"opencode.ai","*.opencode.ai","models.dev"'
+
+die() { echo "oc-run: $*" >&2; exit 2; }
+killtree() { local c; for c in $(pgrep -P "$1"); do killtree "$c"; done; kill "$1" 2>/dev/null; }
+
+top=$(git rev-parse --show-toplevel 2>/dev/null) || die "not in a git repository"
+common=$(cd "$top" && cd "$(git rev-parse --git-common-dir)" && pwd)
+state="$(git rev-parse --absolute-git-dir)/oc"
+mkdir -p "$state"
+
+settings="$state/srt.json"
+tmp="${TMPDIR:-/tmp}"
+cat > "$settings" <<EOF
+{"filesystem":{"denyRead":["~/.ssh"],"allowWrite":["$top","$common","${tmp%/}","/tmp",
+  "~/.local/share/opencode","~/.local/state/opencode","~/.cache/opencode"],
+  "denyWrite":["$common/hooks","$common/config","$state","$top/.claude","$top/.mcp.json"]},
+ "network":{"allowLocalBinding":true,"allowedDomains":[$DOMAINS],"deniedDomains":[]}}
+EOF
+
+sandboxed() {
+  if command -v srt >/dev/null; then command srt --settings "$settings" -- "$@"
+  else npx -y "$SRT_PKG" --settings "$settings" -- "$@"; fi
+}
+
+window() {
+  if [ -n "${TMUX:-}" ]; then tmux new-window -n "$1" "$2"
+  else osascript -e "tell application \"Terminal\" to do script \"$2\"" >/dev/null; fi
+}
+case "${1:-}" in
+  watch) [ -n "${2:-}" ] || die "usage: oc-run watch TITLE"; window "oc:$2" "'$0' __watch '$state/$2.jsonl'"; exit 0 ;;
+  view)  [ -n "${2:-}" ] || die "usage: oc-run view SESSION"; window "oc:${2: -6}" "cd '$top' && opencode --standalone -s '$2'"; exit 0 ;;
+  __watch)
+    tail -n +1 -F "$2" 2>/dev/null | jq --unbuffered -r '
+      if .type == "tool_use" then "> \(.part.tool) \(.part.state.input.command // .part.state.input.filePath // .part.state.input.path // "")  [\(.part.state.status)]"
+      elif .type == "text" then "\n\(.part.text)\n"
+      elif .type == "error" then "ERROR \(.error.message)"
+      else empty end'
+    exit ;;
+esac
+
+session="" title="oc-$(date +%H%M%S)"
+while getopts "s:t:m:" o; do
+  case $o in s) session=$OPTARG ;; t) title=$OPTARG ;; m) MODEL=$OPTARG ;; *) die "bad option" ;; esac
+done
+shift $((OPTIND - 1))
+[ -f "${1:-}" ] || die "usage: oc-run [-s SESSION] [-t TITLE] [-m MODEL] TASK_FILE"
+message=$(cat "$1")
+
+out="$state/$title.jsonl" err="$state/$title.err"
+attempt=0 outcome=""
+while :; do
+  args=(run --standalone --auto -m "$MODEL" --format json)
+  if [ -n "$session" ]; then args+=(-s "$session"); else args+=(--title "$title"); fi
+  : >>"$out"; from=$(( $(wc -l <"$out") + 1 ))
+  ( cd "$top" && sandboxed opencode "${args[@]}" "$message" ) >>"$out" 2>>"$err" &
+  pid=$! start=$SECONDS
+  while kill -0 $pid 2>/dev/null; do
+    if (( SECONDS - start > TIMEOUT )); then killtree $pid; outcome=timeout; break; fi
+    sleep 5
+  done
+  wait $pid 2>/dev/null; code=$?
+  [ -n "$session" ] || session=$(jq -r 'select(.sessionID != null and .sessionID != "") | .sessionID' "$out" 2>/dev/null | head -1)
+  if [ "$outcome" != timeout ]; then
+    if tail -n +$from "$out" | grep -q '"type":"error"'; then outcome=error
+    elif [ $code -ne 0 ]; then outcome="exit $code"
+    else outcome=done; break; fi
+  fi
+  transient=$(tail -n +$from "$out" | grep '"type":"error"' | grep -ciE 'ECONN|connect|socket|timed? ?out|fetch failed|429|50[234]')
+  if (( attempt >= RETRIES )) || { [ "$outcome" != timeout ] && [ "$transient" -eq 0 ]; }; then break; fi
+  attempt=$((attempt + 1))
+  echo "oc-run: retry $attempt after $outcome" >&2
+  [ -n "$session" ] && message="The previous attempt was interrupted ($outcome). Continue the task where you left off."
+  outcome=""
+done
+
+echo "outcome:  $outcome (attempts: $((attempt + 1)))"
+echo "session:  ${session:-none}"
+echo "log:      $out"
+echo "--- worker errors"
+jq -r 'select(.type=="error") | .error.message' "$out" 2>/dev/null | tail -3
+echo "--- worker's final message"
+jq -r 'select(.type=="text") | .part.text' "$out" 2>/dev/null | tail -60
+echo "--- changed files"
+git -C "$top" status --short
+[ "$outcome" = done ]
