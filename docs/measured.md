@@ -54,6 +54,29 @@ Facts about OpenCode, Claude Code and the terminals that oc-connect relies on, w
 - Plugin `userConfig` reaches hooks as `CLAUDE_PLUGIN_OPTION_<KEY>` and the MCP server via `${user_config.KEY}` in `plugin.json` env (the latter measured; the hook variable is from the docs and not yet seen live). Shell-form hook commands reject `${user_config.*}`.
 - A plugin's `.mcp.json` is ALSO read as project config when you work in the plugin's own checkout, and `${CLAUDE_PLUGIN_ROOT}` is empty there: `ENOENT ... /bin/oc`, a second server named `opencode` stuck on "Pending approval". Since 0.6.0 the config lives in `plugin.json` (`mcpServers`, inline object - a path or `.mcp.json` also work).
 
+## Plugin vs. plain CLI vs. Claude alone (2026-10-26, OpenCode 2.1.4, Claude Code 2.1.310)
+
+Three small client tasks in a real repo (seaty: CSV parser fix, CSV export with round trip, duplicate guests on import), each run once per arm as a fresh `claude -p` on `claude-sonnet-5-5`, local commit only. Worker: `opencode/deepseek-v4.1-flash-free` (cost 0). Arms: **A** Claude alone; **B** oc-connect 2.0.0 (`--plugin-dir`, mode `mechanical`); **C** plain `opencode run --standalone` in Claude Code's Bash sandbox, recipe in the system prompt (Claude researches and writes a detailed task, reviews, commits); **Cs** same, but the request is handed over almost verbatim without research. Harness, prompts and branches: `~/Documents/seaty-bench`.
+
+| Task | A | B | C | Cs |
+|---|---|---|---|---|
+| CSV parser | $0.154, 40 s | $0.237, 262 s | $0.210, 209 s | $0.158, 704 s |
+| CSV export | $0.166, 48 s | $0.345, 404 s | $0.257, 1081 s | $0.181, 806 s |
+| Duplicates | $0.151, 40 s | $0.279, 256 s | $0.265, 1263 s | $0.180, 750 s |
+| **Sum** | **$0.471, 128 s** | $0.861 (+83 %), 922 s | $0.732 (+55 %), 2553 s | $0.519 (+10 %), 2260 s |
+
+Claude cost = `total_cost_usd` of the session (matches the transcript's usage incl. background wake-ups). All 12 branches: client vitest, `tsc --noEmit` and `vite build` green; a hidden acceptance test for the parser (6 cases, 4 of them red against the old parser) passed in all four arms.
+
+- At this task size delegating costs MORE Claude tokens than doing it, even with a free worker: research plus review exceed the implementation. Handing over without research (Cs) comes closest to A.
+- B never beat C: the plugin's overhead (skill, MCP tool loading, its own worktree plus cherry-pick back) costs 5-34 % more. B was the most robust: free-endpoint failures in C/Cs (two 10-minute timeouts, one connection error noticed after 20 minutes) cost restarts there, B ran through.
+- C's sandbox held (see below); no safety incident in any arm. The lead misreported once: t1-B's final message said "the worker committed", the transcript shows Claude committed itself after its `review`.
+- Not covered: large tasks (where the saved implementation is bigger), Opus as lead, paid worker models, repeated runs (n=1 per cell, wall times are dominated by free-endpoint failures).
+
+**Claude Code's sandbox around `opencode run`** (`sandbox.enabled`, `allowUnsandboxedCommands: false`, throw-away repo with a bare origin outside the writable paths):
+- The sandbox covers the OpenCode server and every shell command of the worker (child processes of the sandboxed Bash call). Pushes to the out-of-tree origin failed (`unpacker error`), writing to `~` failed.
+- `opencode run` needs `--standalone` (the default background service runs outside the sandbox) and `network.allowLocalBinding: true` (else "Standalone server exited before reporting readiness"). `allowedDomains: opencode.ai, *.opencode.ai, models.dev` was enough for the free models.
+- Permission mode matters: under `dontAsk` unlisted hosts were refused (github.com, example.com: CONNECT 403). Under `bypassPermissions` unlisted hosts were ALLOWED (`curl https://github.com` -> 200); only `deniedDomains` blocked github.com there.
+
 ## Verification status of 2.0.0 (2026-10-24, OpenCode 2.1.4, Claude Code 2.1.310, tmux)
 
 Live, `opencode/deepseek-v4.1-flash-free`, anonymous (empty XDG data/state dir):
