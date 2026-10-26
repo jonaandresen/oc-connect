@@ -23,7 +23,7 @@ import urllib.parse
 import urllib.request
 from typing import Any, Dict, List, Optional
 
-VERSION = "2.0.0"  # keep equal to .claude-plugin/plugin.json (a test checks it)
+VERSION = "2.1.0"  # keep equal to .claude-plugin/plugin.json (a test checks it)
 
 STATE_DIR = os.environ.get("OC_STATE") or os.path.expanduser("~/.local/state/oc-connect")
 JOBS_DIR = os.path.join(STATE_DIR, "jobs")

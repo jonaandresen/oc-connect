@@ -77,6 +77,10 @@ Claude cost = `total_cost_usd` of the session (matches the transcript's usage in
 - `opencode run` needs `--standalone` (the default background service runs outside the sandbox) and `network.allowLocalBinding: true` (else "Standalone server exited before reporting readiness"). `allowedDomains: opencode.ai, *.opencode.ai, models.dev` was enough for the free models.
 - Permission mode matters: under `dontAsk` unlisted hosts were refused (github.com, example.com: CONNECT 403). Under `bypassPermissions` unlisted hosts were ALLOWED (`curl https://github.com` -> 200); only `deniedDomains` blocked github.com there.
 
+## Verification status of 2.1.0 (2026-10-26, OpenCode 2.1.4, tmux)
+
+Background workers, live with `opencode/deepseek-v4.1-flash-free` in a scratch repo (`oc start`, `OC_OPEN` empty): no terminal opened at start; the worker ran and asked for a permission; `oc open` opened a tmux window with the TUI attached to the job's session; `oc close` stopped server and window, no OpenCode process left; `oc send` to the stopped job restarted it in the background in the same session, without a window; `oc done --force` cleaned up. First run failed: the worker's `bash -lc` found OpenCode 1.18 (`/opt/homebrew/bin`) while Claude's PATH has 2.1.4 first (`~/.opencode/bin`) - hence the resolved path in the command. Not checked live: Terminal.app windows for `/oc:show`, Vibe Island with a background worker.
+
 ## Verification status of 2.0.0 (2026-10-24, OpenCode 2.1.4, Claude Code 2.1.310, tmux)
 
 Live, `opencode/deepseek-v4.1-flash-free`, anonymous (empty XDG data/state dir):
@@ -112,7 +116,7 @@ Not yet seen live with the installed plugin (needs a restart): the delegate gate
 
 README demo (docs/demo.gif, 2026-10-24): recorded with asciinema in a tmux session (`claude --plugin-dir . --setting-sources project,local`, `OC_OPENCODE` = OpenCode 1.19.4, `OC_MODEL=opencode/deepseek-v4.1-flash-free`), rendered with `agg --speed 2`. Full cycle in one take: confirmation dialog, worker window, a permission request answered by Claude, monitor events, review with Claude's own defeat test.
 
-Unit tests (2.0.0): 86, green on Python 3.14 and 3.9.
+Unit tests (2.0.0): 86, green on Python 3.14 and 3.9. (2.1.0): 90.
 
 ## Open
 

@@ -94,7 +94,7 @@ def transition(w: JobWatch, st: Dict[str, Any], job: Dict[str, Any], first: bool
     if state == "running":
         mins = core.minutes_since(st.get("updated"))
         if mins is not None and mins >= STALL_MIN and not w.stall_reported:
-            out.append(f"{_name(st)} looks stalled: busy but no activity for {mins:.0f} min -> look at its tab; "
+            out.append(f"{_name(st)} looks stalled: busy but no activity for {mins:.0f} min -> `report` or `open` to look; "
                        "`send` a nudge or stop it")
             w.stall_reported = True
         elif mins is not None and mins < STALL_MIN:

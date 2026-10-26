@@ -1,7 +1,7 @@
 {
   "$schema": "https://anthropic.com/claude-code/plugin.schema.json",
   "name": "oc",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "Let Claude Code hand coding tasks to OpenCode and review every line before it is committed: one git worktree and terminal window per job, live status in Claude Code, workers cannot push.",
   "author": {
     "name": "Jona Andresen",
@@ -56,12 +56,13 @@
     "worker_terminal": {
       "type": "string",
       "title": "Where does a worker open?",
-      "description": "window: its own terminal window, to place next to Claude and watch both. tab: a new tab in Claude's terminal window (Terminal.app needs Accessibility permission for this).",
+      "description": "headless: in the background, no terminal; /oc:show opens a window on it when you want to watch. window: its own terminal window from the start. tab: a new tab in Claude's terminal window (Terminal.app needs Accessibility permission for this).",
       "options": [
+        "headless",
         "window",
         "tab"
       ],
-      "default": "window"
+      "default": "headless"
     }
   }
 }

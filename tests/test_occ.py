@@ -719,15 +719,69 @@ class Reaper(unittest.TestCase):
         core.save_job({"slug": "r1", "dir": d, "port": srv.server_port, "session": "ses_1", "agent": "fixer",
                        "created": time.time(), "closed_reason": "idle for 20 min", "password": "pw"})
         self.addCleanup(core.delete_job, "r1")
-        FakeOpenCode.replies = []
-        with mock.patch.object(core.Worker, "alive", return_value=False), \
-                mock.patch.object(ops, "_wait_alive", return_value=True), \
-                mock.patch.object(ops.terminal, "open_tab", return_value="tab") as tab:
-            out = ops.send("r1", "fix it")
-        tab.assert_called_once()
-        self.assertIn("reopened", out)
-        self.assertNotIn("closed_reason", core.load_job("r1"))
-        self.assertIn(("/api/session/ses_1/prompt", {"text": "fix it"}), FakeOpenCode.replies)
+        real_popen = subprocess.Popen  # git still runs (snapshot); only the worker launch is faked
+        for mode in ("", "window"):  # background by default, a tab when the option asks for one
+            core.save_job(dict(core.load_job("r1"), closed_reason="idle for 20 min"))
+            FakeOpenCode.replies = []
+            with mock.patch.dict(os.environ, {"OC_OPEN": mode}), \
+                    mock.patch.object(core.Worker, "alive", return_value=False), \
+                    mock.patch.object(ops, "_wait_alive", return_value=True), \
+                    mock.patch.object(ops.subprocess, "Popen", side_effect=self.fake_bash(real_popen)) as popen, \
+                    mock.patch.object(ops.terminal, "open_tab", return_value="tab") as tab:
+                out = ops.send("r1", "fix it")
+            bash = [c for c in popen.call_args_list if c[0][0][1:2] == ["-lc"]]
+            self.assertEqual((len(bash), tab.call_count), (1, 0) if mode == "" else (0, 1), mode)
+            self.assertIn("restarted", out)
+            self.assertNotIn("closed_reason", core.load_job("r1"))
+            self.assertIn(("/api/session/ses_1/prompt", {"text": "fix it"}), FakeOpenCode.replies)
+
+    @staticmethod
+    def fake_bash(real):
+        return lambda argv, **kw: mock.Mock() if argv[1:2] == ["-lc"] else real(argv, **kw)
+
+    def test_background_worker_runs_without_terminal(self):
+        core.save_job({"slug": "h1", "dir": "/w", "port": 4101, "agent": "oc-fast", "created": time.time()})
+        self.addCleanup(core.delete_job, "h1")
+        with mock.patch.dict(os.environ, {"OC_OPEN": ""}), \
+                mock.patch.object(ops.subprocess, "Popen") as popen, \
+                mock.patch.object(ops.terminal, "open_tab") as tab:
+            out = ops._run_worker(core.load_job("h1"), False)
+        tab.assert_not_called()
+        argv, kw = popen.call_args
+        self.assertEqual(argv[0][1], "-lc")  # the user's login shell, as in a tab
+        self.assertTrue(argv[0][2].endswith("/bin/oc tab h1 --headless"), argv[0][2])
+        self.assertTrue(kw["start_new_session"])  # no terminal, not killed with Claude's
+        self.assertTrue(core.load_job("h1")["headless"])
+        self.assertIn("/oc:show", out)
+
+    def test_open_attaches_a_window_to_a_background_worker_only(self):
+        core.save_job({"slug": "h2", "dir": "/w", "port": 4101, "created": time.time(), "headless": True})
+        self.addCleanup(core.delete_job, "h2")
+        with mock.patch.object(core.Worker, "alive", return_value=True), \
+                mock.patch.object(ops.terminal, "open_tab", return_value="window") as tab:
+            ops.open_("h2")
+            self.assertTrue(tab.call_args[0][1].endswith("/bin/oc attach h2"), tab.call_args[0][1])
+            self.assertIn("OC_STATE=", tab.call_args[0][1])  # the window's login shell lacks Claude's env
+            tab.reset_mock()
+            core.save_job(dict(core.load_job("h2"), headless=False))
+            self.assertIn("its tab is open", ops.open_("h2"))
+            tab.assert_not_called()
+
+    def test_close_ends_attached_windows_too(self):
+        core.save_job({"slug": "c2", "dir": "/w", "port": 4101, "created": time.time(), "viewers": [111, 222]})
+        self.addCleanup(core.delete_job, "c2")
+        ps = {111: "opencode --server http://127.0.0.1:4101 --session ses_1", 222: "vim notes"}  # 222: PID reused
+        killed = []
+        with mock.patch.object(ops, "_listener_pids", return_value=[]), \
+                mock.patch.object(core, "pid_alive", side_effect=lambda p: p in ps and p not in killed), \
+                mock.patch.object(ops.subprocess, "run", side_effect=lambda a, **k: subprocess.CompletedProcess(
+                    a, 0, stdout=ps.get(int(a[-1]), ""))), \
+                mock.patch.object(ops.os, "kill", side_effect=lambda p, s: killed.append(p)), \
+                mock.patch.object(ops.time, "sleep"), \
+                mock.patch.object(ops.terminal, "close_dead_tabs"):
+            ops.close("c2")
+        self.assertEqual(killed, [111])
+        self.assertNotIn("viewers", core.load_job("c2"))
 
     def test_close_waits_for_the_worker_before_closing_its_tab(self):
         core.save_job({"slug": "c1", "dir": "/w", "port": 4101, "created": time.time()})
@@ -771,7 +825,15 @@ class DeadTabs(unittest.TestCase):
             terminal.close_dead_tabs()
         self.assertEqual(terminal._our_windows(), [456])
 
-    def test_window_is_the_default_and_tab_is_an_option(self):
+    def test_background_is_the_default_window_and_tab_are_options(self):
+        for mode, expect in ((None, "headless"), ("", "headless"), ("window", "window"), ("tab", "tab"),
+                             ("nonsense", "headless")):
+            with mock.patch.dict(os.environ, {"OC_OPEN": mode or ""}):
+                if mode is None:
+                    os.environ.pop("OC_OPEN", None)
+                self.assertEqual(terminal.open_mode(), expect, mode)
+
+    def test_a_terminal_opens_as_window_unless_tab_is_asked_for(self):
         env = {"TERM_PROGRAM": "Apple_Terminal", "OC_TERMINAL": "", "TMUX": ""}
         for mode, expect in ((None, "window"), ("window", "window"), ("tab", "tab"), ("nonsense", "window")):
             e = dict(env, OC_OPEN=mode) if mode else env
@@ -895,6 +957,11 @@ class Release(unittest.TestCase):
                 self.assertEqual(core.opencode_setup()["opencode"], fake)
                 cmd = ops._worker_command({"slug": "s1", "dir": "/w", "port": 4101, "agent": "oc-fast"}, False)
                 self.assertIn(f"OC_OPENCODE='{fake}'", cmd)  # travels to the tab
+            with mock.patch.dict(os.environ, {"OC_OPENCODE": "", "PATH": d + os.pathsep + os.environ["PATH"]}):
+                os.rename(fake, os.path.join(d, "opencode"))
+                cmd = ops._worker_command({"slug": "s1", "dir": "/w", "port": 4101, "agent": "oc-fast"}, False)
+                # resolved in Claude's environment: the tab's login shell may find another OpenCode first
+                self.assertIn(f"OC_OPENCODE={os.path.join(d, 'opencode')} ", cmd)
 
     def test_selftest_names_the_provider_error(self):
         err = {"type": "provider.invalid-request", "message": "Allow free endpoints in your workspace"}

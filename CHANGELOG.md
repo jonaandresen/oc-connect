@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.1.0
+
+- **Workers run in the background by default.** No terminal opens at `delegate`; `/oc:show <job>` (the `open` tool) opens a window with OpenCode's TUI attached to the running worker (`oc attach`), and typing there goes into the job's session. `close`, the reaper and `done` end those windows with the worker. The option `worker_terminal` (`OC_OPEN`) keeps `window` and `tab` for one terminal per job from the start. Session trackers such as Vibe Island see a background worker only while its window is open.
+- A worker started from a login shell found another OpenCode than Claude's (measured: `bash -l` found 1.18 in `/opt/homebrew/bin`, Claude's PATH 2.1.4 in `~/.opencode/bin`). The resolved path now travels with the command, in tabs too.
+
 ## 2.0.0
 
 For OpenCode 2 (tested with 2.1.4). OpenCode 1 users stay on oc-connect 1.x (branch `v1`); this version refuses OpenCode 1 with a pointer there.

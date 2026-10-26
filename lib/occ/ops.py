@@ -141,7 +141,7 @@ def _install_commands(wt: str) -> List[Tuple[str, str]]:
     return found
 
 
-def _worker_command(job: Dict[str, Any], install: bool) -> str:
+def _worker_command(job: Dict[str, Any], install: bool, headless: bool = False) -> str:
     """Shell command for the job's tab: install dependencies, then run the worker.
 
     Installing in the tab keeps ``delegate`` fast and lets the human watch it.
@@ -163,9 +163,39 @@ def _worker_command(job: Dict[str, Any], install: bool) -> str:
     from . import reaper
     oc = shlex.quote(os.path.join(PLUGIN_ROOT, "bin", "oc"))
     steps.append(f"({oc} reap {shlex.quote(job['slug'])} $$ {reaper.idle_close_s():.0f} </dev/null >/dev/null 2>&1 &)")
-    carry = {"OC_STATE": core.STATE_DIR, "OC_OPENCODE": core.opencode_bin(), "OC_PROFILE": profile.mode()}
-    env = " ".join(f"{k}={shlex.quote(v)}" for k, v in carry.items())
-    return "; ".join(steps + [f"exec env {env} {oc} tab {shlex.quote(job['slug'])}"])
+    run = f"exec env {_carry_env()} {oc} tab {shlex.quote(job['slug'])}" + (" --headless" if headless else "")
+    return "; ".join(steps + [run])
+
+
+def _carry_env() -> str:
+    """What a login shell started for a job needs from Claude's environment, as ``K=V`` words."""
+    # Resolved here: the login shell's PATH can find another OpenCode (measured: bash -l found 1.x, Claude 2.x).
+    opencode = shutil.which(core.opencode_bin()) or core.opencode_bin()
+    carry = {"OC_STATE": core.STATE_DIR, "OC_OPENCODE": opencode, "OC_PROFILE": profile.mode()}
+    return " ".join(f"{k}={shlex.quote(v)}" for k, v in carry.items())
+
+
+def _run_worker(job: Dict[str, Any], install: bool) -> str:
+    """Start the job's worker: in the background (default) or in a terminal tab (``OC_OPEN``).
+
+    In the background the same command runs in a login shell of its own session,
+    without a terminal; its output goes to the job's log. ``open_`` shows it.
+    """
+    slug = job["slug"]
+    if terminal.open_mode() != "headless":
+        _set(slug, headless=None)
+        return terminal.open_tab(f"{terminal.TITLE_PREFIX} {slug}", _worker_command(job, install), cwd=job["dir"])
+    _set(slug, headless=True)
+    with open(_log_path(slug), "a") as log:
+        subprocess.Popen([os.environ.get("SHELL") or "bash", "-lc", _worker_command(job, install, headless=True)],
+                         cwd=job["dir"],
+                         stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+    return f"worker {slug} runs in the background - `open` (/oc:show) shows it in a terminal window"
+
+
+def _log_path(slug: str) -> str:
+    os.makedirs(os.path.join(core.STATE_DIR, "logs"), exist_ok=True)
+    return os.path.join(core.STATE_DIR, "logs", slug + ".log")
 
 
 def _session_for(job: Dict[str, Any], w: core.Worker) -> str:
@@ -184,7 +214,7 @@ def _session_for(job: Dict[str, Any], w: core.Worker) -> str:
     return w.create_session(job["title"], job["agent"], model, guard_rules())
 
 
-def tab_main(slug: str) -> int:
+def tab_main(slug: str, headless: bool = False) -> int:
     """The worker, run in its tab: OpenCode's server on the job's port, the TUI on top.
 
     OpenCode 2's TUI has no ``--port`` - it starts a private server or attaches
@@ -193,13 +223,13 @@ def tab_main(slug: str) -> int:
     the job's, creates the session if there is none yet, and attaches the TUI
     to it. Both stay children of this process in the tab's terminal (session
     trackers walk up from OpenCode to the tab), and the server stops with the
-    TUI - or when the reaper or ``close`` signal this process.
+    TUI - or when the reaper or ``close`` signal this process. ``headless``: the
+    server alone, in the background; ``attach_main`` puts a TUI on it.
     """
     job = core.load_job(slug)
     env = dict(os.environ, **worker_env())
     env["OPENCODE_SERVER_PASSWORD"] = job["password"]
-    os.makedirs(os.path.join(core.STATE_DIR, "logs"), exist_ok=True)
-    log = open(os.path.join(core.STATE_DIR, "logs", slug + ".log"), "a")
+    log = open(_log_path(slug), "a")
     procs = [subprocess.Popen([core.opencode_bin(), "serve", "--port", str(job["port"])], cwd=job["dir"], env=env,
                               stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT)]
     _set(slug, tab_pid=os.getpid())
@@ -217,6 +247,8 @@ def tab_main(slug: str) -> int:
         if not sid:
             sid = _session_for(job, w)
             _set(slug, session=sid)
+        if headless:
+            return procs[0].wait()
         procs.insert(0, subprocess.Popen([core.opencode_bin(), "--server", w.base, "--session", sid],
                                          cwd=job["dir"], env=env))
         signal.signal(signal.SIGINT, signal.SIG_IGN)  # Ctrl-C belongs to the TUI, not to its server
@@ -235,6 +267,24 @@ def tab_main(slug: str) -> int:
                 proc.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 proc.kill()
+
+
+def attach_main(slug: str) -> int:
+    """A TUI on a background worker, run in the window ``open_`` opened; typing goes into the job's session.
+
+    Registers its PID (``exec`` keeps it) so ``close`` ends the TUI with the worker.
+    """
+    job = core.load_job(slug)
+    if not job.get("session"):
+        print(f"oc-connect: {slug} has no session yet")
+        time.sleep(5)
+        return 1
+    _set(slug, viewers=[p for p in job.get("viewers", []) if core.pid_alive(p)] + [os.getpid()])
+    env = dict(os.environ, **worker_env())
+    env["OPENCODE_SERVER_PASSWORD"] = job["password"]
+    os.execvpe(core.opencode_bin(), [core.opencode_bin(), "--server", core.worker_of(job).base,
+                                     "--session", job["session"]], env)
+    return 1  # not reached
 
 
 def _wait_alive(w: core.Worker, seconds: float) -> bool:
@@ -323,8 +373,7 @@ def start(slug: str, task: str, title: Optional[str] = None, branch: Optional[st
 def _launch(slug: str, task: str) -> str:
     """Second half of ``start``: open the tab, wait for its worker and session, send the task."""
     job = core.load_job(slug)
-    job["tab"] = terminal.open_tab(f"{terminal.TITLE_PREFIX} {slug}", _worker_command(job, True), cwd=job["dir"])
-    core.save_job(job)
+    _set(slug, tab=_run_worker(job, True))
     w = core.worker_of(job)
     end = time.time() + START_TIMEOUT_S
     while True:
@@ -334,7 +383,7 @@ def _launch(slug: str, task: str) -> str:
         if job.get("session") and w.alive():
             break
         if time.time() > end:
-            raise OcError(f"worker on port {job['port']} did not come up - look at its tab")
+            raise OcError(f"worker on port {job['port']} did not come up - see {_log_path(slug)}")
         time.sleep(1)
     w.prompt(job["session"], task)
     job["sent_at"] = time.time()
@@ -355,12 +404,12 @@ def send(slug: str, text: str) -> str:
     job = core.load_job(slug)
     w = core.worker_of(job)
     reopened = ""
-    if not w.alive():  # closed by hand or by the reaper: same session, fresh tab
-        open_(slug)
+    if not w.alive():  # closed by hand or by the reaper: same session, fresh worker
+        _restart(slug)
         if not _wait_alive(w, 60):
-            raise OcError(f"worker {slug} was stopped and did not come back up - look at its tab")
-        reopened = " (worker was stopped - reopened its tab in the same session)"
-        job = core.load_job(slug)  # open_ changed the job file
+            raise OcError(f"worker {slug} was stopped and did not come back up - see {_log_path(slug)}")
+        reopened = " (worker was stopped - restarted it in the same session)"
+        job = core.load_job(slug)  # _restart changed the job file
     snapshot(slug, f"oc snapshot {slug}: before a follow-up message")  # a correction can make it worse
     w.prompt(job["session"], text)
     job["sent_at"] = time.time()
@@ -662,13 +711,31 @@ def restore(slug: str, commit: Optional[str] = None) -> str:
 
 # --------------------------------------------------------------------------- tabs / lifecycle
 
-def open_(slug: str) -> str:
-    """Open the job's tab; restarts the worker on the same port and session if needed."""
-    job = core.load_job(slug)
-    if core.worker_of(job).alive():
-        return f"worker {slug} is running (port {job['port']}) - its tab is open"
+def _restart(slug: str) -> str:
+    """Start a stopped worker again, on the same port and session."""
     _set(slug, closed_reason=None)
-    return terminal.open_tab(f"{terminal.TITLE_PREFIX} {slug}", _worker_command(job, False), cwd=job["dir"])
+    return _run_worker(core.load_job(slug), False)
+
+
+def open_(slug: str) -> str:
+    """Show the job to the user; restarts a stopped worker in the same session first.
+
+    A background worker gets a terminal window with a TUI attached to it
+    (``oc attach``); a worker in a tab is already visible there.
+    """
+    job = core.load_job(slug)
+    w = core.worker_of(job)
+    if not w.alive():
+        out = _restart(slug)
+        if not core.load_job(slug).get("headless"):
+            return out
+        if not _wait_alive(w, 60):
+            raise OcError(f"worker {slug} did not come back up - see {_log_path(slug)}")
+    elif not job.get("headless"):
+        return f"worker {slug} is running (port {job['port']}) - its tab is open"
+    oc = shlex.quote(os.path.join(PLUGIN_ROOT, "bin", "oc"))
+    return terminal.open_tab(f"{terminal.TITLE_PREFIX} {slug}",
+                             f"exec env {_carry_env()} {oc} attach {shlex.quote(slug)}", cwd=job["dir"])
 
 
 def _listener_pids(port: int) -> List[int]:
@@ -678,11 +745,23 @@ def _listener_pids(port: int) -> List[int]:
 
 def _tab_pid(job: Dict[str, Any]) -> List[int]:
     """The job's ``oc tab`` process, if it still runs - checked by its command line (PIDs get reused)."""
-    pid = job.get("tab_pid")
-    if not pid or not core.pid_alive(pid):
-        return []
-    args = subprocess.run(["ps", "-o", "args=", "-p", str(pid)], capture_output=True, text=True).stdout
-    return [int(pid)] if f" tab {job['slug']}" in args else []
+    return _ours([job["tab_pid"]] if job.get("tab_pid") else [], f" tab {job['slug']}")
+
+
+def _viewer_pids(job: Dict[str, Any]) -> List[int]:
+    """TUIs ``open_`` attached to a background worker (``attach_main`` became OpenCode under the same PID)."""
+    return _ours(job.get("viewers", []), "--server")
+
+
+def _ours(pids: List[int], needle: str) -> List[int]:
+    found = []
+    for pid in pids:
+        if not core.pid_alive(pid):
+            continue
+        args = subprocess.run(["ps", "-o", "args=", "-p", str(pid)], capture_output=True, text=True).stdout
+        if needle in args:
+            found.append(int(pid))
+    return found
 
 
 def close(slug: str) -> str:
@@ -692,7 +771,8 @@ def close(slug: str) -> str:
     still holds the process is not closed, so wait for it to be gone.
     """
     job = core.load_job(slug)
-    pids = _tab_pid(job) + _listener_pids(int(job["port"]))
+    pids = _tab_pid(job) + _listener_pids(int(job["port"])) + _viewer_pids(job)
+    _set(slug, viewers=None)
     if not pids:
         return f"worker {slug} is not running"
     for pid in pids:

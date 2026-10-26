@@ -23,8 +23,9 @@ WINDOWS_FILE = os.path.join(os.environ.get("OC_STATE") or os.path.expanduser("~/
 
 
 def open_mode() -> str:
-    """``window`` (default) or ``tab``, from the plugin option / ``OC_OPEN``."""
-    return "tab" if (os.environ.get("OC_OPEN") or "").strip().lower() == "tab" else "window"
+    """Where a worker runs: ``headless`` (default), ``window`` or ``tab`` - plugin option / ``OC_OPEN``."""
+    mode = (os.environ.get("OC_OPEN") or "").strip().lower()
+    return mode if mode in ("window", "tab") else "headless"
 
 
 def _terminal() -> str:

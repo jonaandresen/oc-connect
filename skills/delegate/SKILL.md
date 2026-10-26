@@ -1,6 +1,6 @@
 ---
 name: delegate
-description: Hand a bounded coding task (issue number or description) to an OpenCode worker - own git worktree, own terminal tab, questions come to Claude first, Claude reviews the diff before anything is committed. Use for "do this with OpenCode", "give this to OpenCode", "/oc:delegate", "let the workers do it", or when Claude decides a well-specified implementation task is worth delegating.
+description: Hand a bounded coding task (issue number or description) to an OpenCode worker - own git worktree, runs in the background, questions come to Claude first, Claude reviews the diff before anything is committed. Use for "do this with OpenCode", "give this to OpenCode", "/oc:delegate", "let the workers do it", or when Claude decides a well-specified implementation task is worth delegating.
 argument-hint: "<#issue | task description>"
 ---
 
@@ -40,13 +40,13 @@ The `setup` tool shows the models. With `OC_PROFILE=inherit` workers use the use
 
 1. **Research:** read the issue, find the code, settle what must come out. The task names files with line numbers and evidence.
 2. **Write the task** using the template below.
-3. **Start:** `delegate` with `slug` (issue number or short name), `title` (starting with the issue number), `task`, and `agent`. It creates the worktree from the remote's default branch (local unpushed commits are not in it), copies git-ignored `.env` files and returns. In the background the session is created, a new terminal tab opens directly in that session, installs dependencies from lockfiles, starts the worker and gets the task.
+3. **Start:** `delegate` with `slug` (issue number or short name), `title` (starting with the issue number), `task`, and `agent`. It creates the worktree from the remote's default branch (local unpushed commits are not in it), copies git-ignored `.env` files and returns. In the background the worker starts (headless unless the user chose a tab or window), installs dependencies from lockfiles, creates the session and gets the task. `open` shows it to the user.
 4. **Wait:** do nothing. The oc-connect monitor tells you when the job runs (with the browser link for the human), asks something, finishes, fails, stalls, gets expensive or its worker stops. Only jobs owned by this session are reported; leave jobs of other live Claude sessions alone. Without a monitor (non-interactive sessions): `oc wait <slug>` in Bash with `run_in_background`.
 5. **Questions come to Claude first:** the monitor gives the question id.
    - Answer yourself when the task, the code, the project rules or the issue settle it, or when it is purely technical: `answer` with that `question_id`. Permission requests: `permit` with `once` or `reject` (reject anything the guard forbids in spirit).
    - Forward to the human when it is a product, legal or money decision or the evidence conflicts: ask with your recommendation first, and send a push notification if they may be away. Then pass the answer on with `answer`.
    - Never guess just to keep the worker going. If the monitor says the question was answered directly in OpenCode, read the session before assuming what was decided.
-6. **Failed, stalled, expensive:** `report` shows the error. A provider error or rate limit usually just needs `send` "continue". A stall or a cost warning often means the worker goes in circles - look at the tab, then correct or stop.
+6. **Failed, stalled, expensive:** `report` shows the error. A provider error or rate limit usually just needs `send` "continue". A stall or a cost warning often means the worker goes in circles - read `report`, then correct or stop.
 7. **Review (mandatory, never delegated):**
    - `report`, then read the FULL diff in the worktree, not just the worker's summary.
    - Run all of the project's check commands yourself, including the ones the task did not name (type checks!).

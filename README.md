@@ -2,7 +2,7 @@
 
 **Let Claude Code hand coding tasks to [OpenCode](https://opencode.ai) - and review every line before it is committed.**
 
-Claude does the thinking: it plans, writes a precise task and reviews the result. OpenCode does the typing, on a cheaper or free model, in its own git worktree and its own terminal window you can watch.
+Claude does the thinking: it plans, writes a precise task and reviews the result. OpenCode does the typing, on a cheaper or free model, in its own git worktree, in the background - open a window on it whenever you want to watch.
 
 [![Release](https://img.shields.io/github/v/release/jonaandresen/oc-connect?sort=semver)](https://github.com/jonaandresen/oc-connect/releases)
 [![OpenCode](https://img.shields.io/badge/OpenCode-2.x-orange)](https://opencode.ai)
@@ -57,12 +57,12 @@ Just ask:
 
 > Do this with OpenCode: add input validation to the signup form, with tests.
 
-Claude writes the task, you confirm in a dialog, a worker opens in its own window. When it finishes, Claude reads the full diff, runs the checks, breaks the code on purpose to see the tests catch it, and tells you what is still missing. Nothing is committed before that.
+Claude writes the task, you confirm in a dialog, a worker starts in the background (`/oc:show` lets you watch it). When it finishes, Claude reads the full diff, runs the checks, breaks the code on purpose to see the tests catch it, and tells you what is still missing. Nothing is committed before that.
 
 | Command | |
 |---|---|
 | `/oc:status` | All jobs |
-| `/oc:show <job>` | Bring a job's window to the front |
+| `/oc:show <job>` | Open a window on a job's worker |
 | `/oc:stop <job>` | Stop a worker (its work stays) |
 | `/oc:board` | Live board in a terminal |
 | `/oc:mode` | When Claude may delegate: `ask` (default), `off`, `mechanical`, `auto` |
@@ -71,7 +71,7 @@ Claude writes the task, you confirm in a dialog, a worker opens in its own windo
 ## What it does
 
 - **You stay in charge.** Every delegation needs your OK by default - enforced by a hook, not by the model's good will.
-- **One job, one window.** Each job gets its own git worktree, terminal window and OpenCode process. Run several at once.
+- **One job, one worktree.** Each job gets its own git worktree and OpenCode process, in the background or in its own window. Run several at once.
 - **Live status.** Rows under your prompt show each job's progress, diff and cost; Claude is notified the moment a worker asks, finishes or fails.
 - **Questions handled.** Claude answers what the code settles and only passes the real decisions on to you.
 - **Workers cannot ship.** They cannot commit, push, merge or run docker - two layers, proven by `oc selftest`.
@@ -82,7 +82,7 @@ Claude writes the task, you confirm in a dialog, a worker opens in its own windo
 ## How it works
 
 ```
-you ──► Claude Code (lead) ──task──► OpenCode worker  (own window, own worktree)
+you ──► Claude Code (lead) ──task──► OpenCode worker  (own worktree, background)
             ▲  reviews diff, runs checks,          │
             │  defeat test, finds gaps             │ question? done? failed?
             └──────── notification ◄───────────────┘

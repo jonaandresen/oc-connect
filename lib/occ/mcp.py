@@ -54,8 +54,8 @@ def instructions() -> str:
         agent_line = "Agent: OpenCode's built-in `build` (oh-my-opencode not installed; that is fine)."
     mode = core.autonomy()
     return f"""oc-connect lets you hand implementation tasks to OpenCode workers running on cheaper models.
-Each job gets its own git worktree, its own OpenCode process and its own terminal tab the user can watch
-(session trackers such as Vibe Island show every job). Workers cannot commit, push, run docker or ssh.
+Each job gets its own git worktree and its own OpenCode process, running in the background (or in a
+terminal tab, if the user chose that); `open` shows a worker to the user in a terminal window. Workers cannot commit, push, run docker or ssh.
 
 WHEN TO DELEGATE ({mode}): {_AUTONOMY_RULES[mode]}
 The user controls this: a confirmation dialog in modes off and ask, `/oc:mode` switches the mode.
@@ -67,7 +67,7 @@ If the user says "do this with OpenCode" (or similar), always delegate that task
 
 HOW: 1) Research first and write a precise task (files with lines, required behaviour, tests, what must
 not change, the project's check commands). The skill `oc:delegate` has the full template - load it
-before your first delegation in a session. 2) `delegate` - it returns once the tab is open; the worker
+before your first delegation in a session. 2) `delegate` - it returns at once; the worker
 starts in the background. 3) The oc-connect monitor notifies you: running, questions (with an id),
 finished, failed, stalled, over budget, stopped. Do not poll. Only jobs owned by THIS session are
 reported; leave jobs of other live Claude sessions alone unless the user says otherwise.
@@ -90,10 +90,10 @@ def _slug_schema(desc: str = "job slug, e.g. issue number or short name") -> Dic
 
 TOOLS: Dict[str, Dict[str, Any]] = {
     "delegate": {
-        "description": "Start an OpenCode worker on a task: new git worktree + branch, own terminal tab, "
+        "description": "Start an OpenCode worker on a task: new git worktree + branch, own OpenCode process, "
                        "OpenCode session, task sent. Returns immediately; the monitor reports progress.",
         "inputSchema": {"type": "object", "required": ["slug", "task"], "properties": {
-            "slug": _slug_schema("short id used for worktree, tab and branch, e.g. '276' or 'tests-cart'"),
+            "slug": _slug_schema("short id used for worktree and branch, e.g. '276' or 'tests-cart'"),
             "task": {"type": "string", "description": "complete task text for the worker (markdown)"},
             "title": {"type": "string", "description": "session title, e.g. '#276 Show orders only after payment'"},
             "agent": {"type": "string", "description": "worker agent: oc-fast (default), oc-strong, oc-ui - "
@@ -136,11 +136,11 @@ TOOLS: Dict[str, Dict[str, Any]] = {
             "request_id": {"type": "string", "description": "id from the monitor or status"}}},
     },
     "open": {
-        "description": "Open the job's terminal tab for the user (restarts a stopped worker, same session).",
+        "description": "Show the job's worker to the user in a terminal window (restarts a stopped worker, same session).",
         "inputSchema": {"type": "object", "required": ["slug"], "properties": {"slug": _slug_schema()}},
     },
     "close": {
-        "description": "Stop a job's worker (its tab closes). Worktree and session stay. "
+        "description": "Stop a job's worker (its window closes). Worktree and session stay. "
                        "Do this once the PR exists and no correction is pending.",
         "inputSchema": {"type": "object", "required": ["slug"], "properties": {"slug": _slug_schema()}},
     },

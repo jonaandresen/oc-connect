@@ -111,8 +111,8 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("slug")
     s.add_argument("reply", choices=["once", "always", "reject"])
 
-    for name, hlp in (("open", "open the job's tab (restarts the worker if needed)"),
-                      ("close", "stop the worker; its tab closes")):
+    for name, hlp in (("open", "show the job's worker in a terminal window (restarts it if needed)"),
+                      ("close", "stop the worker; its window closes")):
         sub.add_parser(name, help=hlp).add_argument("slug")
     s = sub.add_parser("done", help="stop the worker and remove the worktree (branch stays)")
     s.add_argument("slug")
@@ -142,6 +142,9 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("mcp", help="run the MCP server on stdio (used by Claude Code)")
     sub.add_parser("monitor", help="print one line per job event (used by Claude Code)")
     s = sub.add_parser("tab", help="run a job's worker - OpenCode server and TUI (runs in its tab)")
+    s.add_argument("slug")
+    s.add_argument("--headless", action="store_true", help="the server alone, no TUI")
+    s = sub.add_parser("attach", help="a TUI on a job's background worker (runs in the window `open` opens)")
     s.add_argument("slug")
     s = sub.add_parser("reap", help="stop a worker once Claude no longer uses it (runs in its tab)")
     s.add_argument("slug")
@@ -224,7 +227,9 @@ def main(argv=None) -> int:
             from . import monitor
             monitor.main()
         elif args.cmd == "tab":
-            return ops.tab_main(args.slug)
+            return ops.tab_main(args.slug, args.headless)
+        elif args.cmd == "attach":
+            return ops.attach_main(args.slug)
         elif args.cmd == "reap":
             from . import reaper
             reaper.main(args.slug, args.pid, args.idle_seconds)
